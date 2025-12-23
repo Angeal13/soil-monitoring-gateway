@@ -1,24 +1,2 @@
-# Flask Framework
 Flask==2.3.3
-Werkzeug==2.3.7
-
-# Database Connection
-mysql-connector-python==8.1.0
-
-# Production Web Server
-gunicorn==21.2.0
-
-# Environment Configuration
-python-dotenv==1.0.0
-
-# HTTP Client (for potential webhooks/API calls)
 requests==2.31.0
-
-# Timezone Support
-pytz==2023.3
-
-# System Monitoring
-psutil==5.9.5
-
-# Enhanced Logging
-structlog==23.1.0
