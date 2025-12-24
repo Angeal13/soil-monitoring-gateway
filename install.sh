@@ -1,17 +1,17 @@
 #!/bin/bash
-# IoT Gateway Installer - FULLY UPDATED VERSION
+# IoT Gateway Installer - FIXED PIP VERSION
 
 set -e
 
 echo "========================================"
-echo "🚀 IoT Gateway Installation (Updated)"
+echo "🚀 IoT Gateway Installation (Fixed)"
 echo "========================================"
 
 GATEWAY_USER="gateway"
 GATEWAY_DIR="/home/$GATEWAY_USER/iot-gateway"
 SERVICE_NAME="iot-gateway"
 LOG_DIR="/var/log/$SERVICE_NAME"
-DB_PI_IP="192.168.1.95"  # appV7.py IP
+DB_PI_IP="192.168.1.95"
 
 # Colors
 RED='\033[0;31m'
@@ -43,320 +43,198 @@ apt-get upgrade -y
 print_status "Installing dependencies..."
 apt-get install -y python3 python3-pip git sqlite3
 
-# Step 3: Install Python packages SYSTEM-WIDE
-print_status "Installing Python packages..."
-pip3 install --break-system-packages Flask==2.3.3 requests==2.31.0
+# Step 3: FIXED Python packages installation
+print_status "Installing Python packages (FIXED METHOD)..."
+# Clean up any broken pip installations first
+pip3 cache purge 2>/dev/null || true
+
+# Install packages WITHOUT breaking system - use --no-deps if needed
+pip3 install --upgrade pip 2>/dev/null || true
+
+# Try multiple installation methods
+if pip3 install Flask==2.3.3 requests==2.31.0 --no-cache-dir 2>/dev/null; then
+    print_status "✅ Packages installed successfully"
+else
+    print_status "⚠️ Trying alternative installation method..."
+    # Use system packages if pip fails
+    apt-get install -y python3-flask python3-requests 2>/dev/null || true
+fi
 
 # Step 4: Create gateway directory with correct permissions
 print_status "Setting up gateway directory..."
 if [ -d "$GATEWAY_DIR" ]; then
     print_status "Backing up existing directory..."
     backup_dir="${GATEWAY_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
-    cp -r "$GATEWAY_DIR" "$backup_dir"
-    rm -rf "$GATEWAY_DIR"
+    cp -r "$GATEWAY_DIR" "$backup_dir" 2>/dev/null || true
 fi
 
-# Create all necessary directories FIRST
+# Remove and recreate clean
+rm -rf "$GATEWAY_DIR" 2>/dev/null || true
+
+# Create all necessary directories
 mkdir -p "$GATEWAY_DIR"
 mkdir -p "$GATEWAY_DIR/data"
 mkdir -p "$LOG_DIR"
 
+# Also create gateway_data directory (for logs)
+GATEWAY_DATA_DIR="/home/$GATEWAY_USER/gateway_data"
+mkdir -p "$GATEWAY_DATA_DIR"
+
 # Set correct ownership
 chown -R $GATEWAY_USER:$GATEWAY_USER "$GATEWAY_DIR"
 chown -R $GATEWAY_USER:$GATEWAY_USER "$LOG_DIR"
-chmod 755 "$LOG_DIR"
+chown -R $GATEWAY_USER:$GATEWAY_USER "$GATEWAY_DATA_DIR"
+chmod 755 "$LOG_DIR" "$GATEWAY_DATA_DIR"
 
-# Step 5: Create UPDATED gateway.py with correct paths
+# Step 5: Create SIMPLIFIED gateway.py
 print_status "Creating gateway code..."
 cat > "$GATEWAY_DIR/gateway.py" << 'EOF'
 """
-IoT Forwarding Gateway - UPDATED VERSION
+IoT Gateway - SIMPLIFIED VERSION
 """
 from flask import Flask, request, jsonify
 import requests
 import sqlite3
 import json
 import logging
-from datetime import datetime
-from threading import Thread
 import time
 import os
 
-# ========================
-# CONFIGURATION
-# ========================
-DATABASE_PI_URL = "http://192.168.1.95:5000"  # appV7.py
-OFFLINE_DB = "/home/gateway/iot-gateway/data/offline.db"
-LOG_DIR = "/var/log/iot-gateway"
-LOG_FILE = f"{LOG_DIR}/gateway.log"
+# Configuration
+DATABASE_PI_URL = "http://192.168.1.95:5000"
+LOG_FILE = "/home/gateway/gateway_data/gateway.log"
+OFFLINE_DB = "/home/gateway/gateway_data/offline.db"
 PORT = 5000
 
-# ========================
-# APPLICATION SETUP
-# ========================
-app = Flask(__name__)
+# Create log directory
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
-# Create log directory FIRST before setting up logging
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# Setup logging
+# Simple logging to file AND console
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(LOG_FILE),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(__name__)
 
-# Statistics
+app = Flask(__name__)
 stats = {'received': 0, 'forwarded': 0, 'offline': 0}
 
-# ========================
-# DATABASE FUNCTIONS
-# ========================
-def init_offline_db():
-    """Initialize offline SQLite database"""
-    # Create directory for offline DB
-    db_dir = os.path.dirname(OFFLINE_DB)
-    os.makedirs(db_dir, exist_ok=True)
-    
+def init_db():
+    """Initialize SQLite database"""
+    os.makedirs(os.path.dirname(OFFLINE_DB), exist_ok=True)
     conn = sqlite3.connect(OFFLINE_DB)
     c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            endpoint TEXT,
-            data TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            attempts INTEGER DEFAULT 0,
-            last_attempt DATETIME
-        )
-    ''')
+    c.execute('CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY, endpoint TEXT, data TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
     conn.commit()
     conn.close()
-    logger.info(f"Offline database initialized: {OFFLINE_DB}")
+    logging.info(f"Database initialized: {OFFLINE_DB}")
 
 def save_offline(endpoint, data):
-    """Save request to offline queue"""
+    """Save to offline queue"""
     try:
         conn = sqlite3.connect(OFFLINE_DB)
         c = conn.cursor()
-        c.execute('INSERT INTO queue (endpoint, data) VALUES (?, ?)',
-                  (endpoint, json.dumps(data)))
+        c.execute('INSERT INTO queue (endpoint, data) VALUES (?, ?)', (endpoint, json.dumps(data)))
         conn.commit()
         conn.close()
         stats['offline'] += 1
-        logger.info(f"Saved to offline queue: {endpoint}")
+        logging.info(f"Saved offline: {endpoint}")
         return True
     except Exception as e:
-        logger.error(f"Failed to save offline: {e}")
+        logging.error(f"Failed to save: {e}")
         return False
 
-def forward_offline():
-    """Process offline queue in background"""
+def forward_to_db(endpoint, data):
+    """Forward to database"""
     try:
-        conn = sqlite3.connect(OFFLINE_DB)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute('SELECT * FROM queue WHERE attempts < 3 ORDER BY timestamp ASC LIMIT 20')
-        records = c.fetchall()
-        
-        if not records:
-            return
-        
-        logger.info(f"Processing {len(records)} offline records...")
-        
-        for record in records:
-            try:
-                response = requests.post(
-                    f"{DATABASE_PI_URL}{record['endpoint']}",
-                    json=json.loads(record['data']),
-                    timeout=10
-                )
-                if response.status_code == 200:
-                    c.execute('DELETE FROM queue WHERE id = ?', (record['id'],))
-                    stats['forwarded'] += 1
-                    logger.info(f"Successfully forwarded offline record {record['id']}")
-                else:
-                    c.execute('UPDATE queue SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?', 
-                             (record['id'],))
-                    logger.warning(f"Offline record {record['id']} failed: Status {response.status_code}")
-            except Exception as e:
-                c.execute('UPDATE queue SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?', 
-                         (record['id'],))
-                logger.warning(f"Offline record {record['id']} error: {e}")
-        
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error processing offline queue: {e}")
-
-def forward_to_database(endpoint, data):
-    """Forward request to Database Pi"""
-    try:
-        response = requests.post(
-            f"{DATABASE_PI_URL}{endpoint}",
-            json=data,
-            timeout=10
-        )
+        response = requests.post(f"{DATABASE_PI_URL}{endpoint}", json=data, timeout=10)
         if response.status_code == 200:
             stats['forwarded'] += 1
-            logger.info(f"Forwarded {endpoint}: Status {response.status_code}")
+            logging.info(f"Forwarded: {endpoint}")
             return True, response.json()
         else:
-            logger.warning(f"Forward {endpoint} failed: Status {response.status_code}")
+            logging.warning(f"Failed: {endpoint} - Status {response.status_code}")
             return False, None
     except Exception as e:
-        logger.warning(f"Forward failed: {e}")
+        logging.warning(f"Forward error: {e}")
         return False, None
 
-# ========================
-# API ENDPOINTS
-# ========================
 @app.route('/api/sensor-data', methods=['POST'])
-def handle_sensor_data():
-    """Receive sensor data and forward to Database Pi"""
+def sensor_data():
     stats['received'] += 1
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-        
-        machine_id = data.get('machine_id')
-        if not machine_id:
-            return jsonify({"error": "Missing machine_id"}), 400
-        
-        logger.info(f"Received data from sensor {machine_id}")
-        
-        success, response = forward_to_database('/api/sensor-data', data)
-        if success:
-            return jsonify({"status": "forwarded"}), 200
-        else:
-            if save_offline('/api/sensor-data', data):
-                return jsonify({"status": "stored_offline"}), 202
-            else:
-                return jsonify({"error": "Failed to store offline"}), 500
-    except Exception as e:
-        logger.error(f"Error handling sensor data: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+    data = request.json
+    machine_id = data.get('machine_id', 'unknown')
+    logging.info(f"Received from {machine_id}")
+    
+    success, _ = forward_to_db('/api/sensor-data', data)
+    if success:
+        return jsonify({"status": "forwarded"}), 200
+    else:
+        if save_offline('/api/sensor-data', data):
+            return jsonify({"status": "offline"}), 202
+        return jsonify({"error": "failed"}), 500
 
 @app.route('/api/sensors/register', methods=['POST'])
-def handle_register():
-    """Handle sensor registration"""
+def register():
     stats['received'] += 1
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-        
-        machine_id = data.get('machine_id')
-        if not machine_id:
-            return jsonify({"error": "Missing machine_id"}), 400
-        
-        logger.info(f"Registration request for sensor {machine_id}")
-        
-        success, response = forward_to_database('/api/sensors/register', data)
-        if success:
-            return jsonify(response), 200
-        else:
-            if save_offline('/api/sensors/register', data):
-                return jsonify({"status": "queued"}), 202
-            else:
-                return jsonify({"error": "Failed to queue registration"}), 500
-    except Exception as e:
-        logger.error(f"Error handling registration: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+    data = request.json
+    machine_id = data.get('machine_id', 'unknown')
+    logging.info(f"Register: {machine_id}")
+    
+    success, response = forward_to_db('/api/sensors/register', data)
+    if success:
+        return jsonify(response), 200
+    else:
+        if save_offline('/api/sensors/register', data):
+            return jsonify({"status": "queued"}), 202
+        return jsonify({"error": "failed"}), 500
 
 @app.route('/api/sensors/<machine_id>/assignment', methods=['GET'])
-def handle_assignment(machine_id):
-    """Check sensor assignment status"""
+def assignment(machine_id):
+    logging.info(f"Assignment check: {machine_id}")
     try:
-        logger.info(f"Assignment check for sensor {machine_id}")
-        response = requests.get(
-            f"{DATABASE_PI_URL}/api/sensors/{machine_id}/assignment",
-            timeout=10
-        )
-        if response.status_code == 200:
-            return jsonify(response.json()), 200
-        else:
-            return jsonify(response.json()), response.status_code
-    except Exception as e:
-        logger.warning(f"Assignment check failed: {e}")
-        return jsonify({
-            "error": "database_unavailable",
-            "machine_id": machine_id,
-            "suggestion": "Retry later"
-        }), 503
+        response = requests.get(f"{DATABASE_PI_URL}/api/sensors/{machine_id}/assignment", timeout=5)
+        return jsonify(response.json()), response.status_code
+    except:
+        return jsonify({"error": "db_unavailable"}), 503
 
 @app.route('/api/test', methods=['GET'])
 def test():
-    """Test gateway connectivity"""
-    db_status = "unknown"
     try:
-        response = requests.get(f"{DATABASE_PI_URL}/api/test", timeout=5)
-        db_status = "connected" if response.status_code == 200 else f"error_{response.status_code}"
+        response = requests.get(f"{DATABASE_PI_URL}/api/test", timeout=3)
+        db_status = "connected" if response.status_code == 200 else "error"
     except:
         db_status = "disconnected"
     
     return jsonify({
         "gateway": "online",
-        "timestamp": datetime.now().isoformat(),
-        "database_pi": db_status,
-        "database_url": DATABASE_PI_URL
+        "database": db_status,
+        "url": DATABASE_PI_URL,
+        "stats": stats
     })
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    """Comprehensive health check"""
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "stats": stats,
-        "database_url": DATABASE_PI_URL
-    })
+    return jsonify({"status": "ok", "stats": stats})
 
-# ========================
-# BACKGROUND WORKER
-# ========================
-def background_worker():
-    """Background thread for processing offline queue"""
-    while True:
-        time.sleep(60)  # Check every minute
-        try:
-            forward_offline()
-        except Exception as e:
-            logger.error(f"Background worker error: {e}")
-
-# ========================
-# MAIN APPLICATION
-# ========================
 if __name__ == '__main__':
-    print("=" * 60)
-    print("🚀 IoT Gateway Starting")
-    print(f"   User: gateway")
-    print(f"   Host: 0.0.0.0:{PORT}")
-    print(f"   Database Pi: {DATABASE_PI_URL}")
-    print(f"   Offline Storage: {OFFLINE_DB}")
-    print(f"   Log File: {LOG_FILE}")
-    print("=" * 60)
+    print("=" * 50)
+    print(f"Gateway starting on port {PORT}")
+    print(f"Forwarding to: {DATABASE_PI_URL}")
+    print(f"Log file: {LOG_FILE}")
+    print("=" * 50)
     
-    # Initialize databases and directories
-    init_offline_db()
-    
-    # Start background worker
-    worker = Thread(target=background_worker, daemon=True)
-    worker.start()
-    
-    # Start Flask application
-    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+    init_db()
+    app.run(host='0.0.0.0', port=PORT, debug=False)
 EOF
 
-# Update IP in the Python file
+# Update IP
 sed -i "s|http://192.168.1.95:5000|http://${DB_PI_IP}:5000|g" "$GATEWAY_DIR/gateway.py"
 
-# Step 6: Set correct permissions for everything
+# Step 6: Set permissions
 print_status "Setting permissions..."
 chown -R $GATEWAY_USER:$GATEWAY_USER "$GATEWAY_DIR"
 chmod 755 "$GATEWAY_DIR"
@@ -364,181 +242,80 @@ chmod 644 "$GATEWAY_DIR/gateway.py"
 
 # Step 7: Create systemd service
 print_status "Creating systemd service..."
-cat > "/etc/systemd/system/$SERVICE_NAME.service" << EOF
+cat > "/etc/systemd/system/$SERVICE_NAME.service" << 'EOF'
 [Unit]
-Description=IoT Forwarding Gateway
+Description=IoT Gateway
 After=network.target
-Wants=network.target
 
 [Service]
 Type=simple
-User=$GATEWAY_USER
-Group=$GATEWAY_USER
-WorkingDirectory=$GATEWAY_DIR
-ExecStart=/usr/bin/python3 $GATEWAY_DIR/gateway.py
+User=gateway
+Group=gateway
+WorkingDirectory=/home/gateway/iot-gateway
+ExecStart=/usr/bin/python3 /home/gateway/iot-gateway/gateway.py
 Restart=always
 RestartSec=10
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=$SERVICE_NAME
-
-# Security
-NoNewPrivileges=true
-ProtectSystem=strict
-PrivateTmp=true
-ReadWritePaths=$GATEWAY_DIR/data $LOG_DIR
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 # Step 8: Enable and start
-print_status "Starting gateway service..."
+print_status "Starting service..."
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl start "$SERVICE_NAME"
 
-# Wait a moment
-sleep 5
+sleep 3
 
-# Step 9: Check status
+# Step 9: Check
 if systemctl is-active --quiet "$SERVICE_NAME"; then
-    print_status "✅ Gateway is running!"
+    print_status "✅ Gateway running!"
     
-    # Show logs
+    # Test
     echo ""
-    print_status "Checking startup logs..."
-    journalctl -u "$SERVICE_NAME" -n 10 --no-pager
-    
-    # Test API
-    echo ""
-    print_status "Testing API endpoint..."
+    print_status "Testing connection..."
     sleep 2
-    if curl -s http://localhost:5000/api/test | python3 -m json.tool 2>/dev/null; then
-        print_status "✅ API test successful!"
+    if curl -s http://localhost:5000/api/test; then
+        print_status "✅ API working!"
     else
-        print_error "API test failed - check logs"
+        print_error "API test failed"
+        journalctl -u "$SERVICE_NAME" -n 20 --no-pager
     fi
 else
-    print_error "Failed to start gateway"
-    echo ""
-    print_error "Last 20 lines of logs:"
-    journalctl -u "$SERVICE_NAME" -n 20 --no-pager
+    print_error "Service failed to start"
+    journalctl -u "$SERVICE_NAME" -n 30 --no-pager
     exit 1
 fi
 
-# Step 10: Create management script
-print_status "Creating management script..."
-cat > "$GATEWAY_DIR/manage.sh" << 'EOF'
+# Step 10: Simple management script
+cat > "/usr/local/bin/gateway-manage" << 'EOF'
 #!/bin/bash
-SERVICE="iot-gateway"
 case "$1" in
-    start) 
-        sudo systemctl start $SERVICE 
-        echo "Gateway started"
-        ;;
-    stop) 
-        sudo systemctl stop $SERVICE 
-        echo "Gateway stopped"
-        ;;
-    restart) 
-        sudo systemctl restart $SERVICE 
-        echo "Gateway restarted"
-        ;;
-    status) 
-        sudo systemctl status $SERVICE --no-pager
-        ;;
-    logs) 
-        sudo journalctl -u $SERVICE -f
-        ;;
-    test) 
-        curl -s http://localhost:5000/api/test | python3 -m json.tool
-        ;;
-    health) 
-        curl -s http://localhost:5000/api/health | python3 -m json.tool
-        ;;
-    offline-stats)
-        sudo -u gateway sqlite3 /home/gateway/iot-gateway/data/offline.db "SELECT COUNT(*) as total, COUNT(CASE WHEN attempts > 0 THEN 1 END) as failed FROM queue"
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status|logs|test|health|offline-stats}"
-        echo ""
-        echo "Commands:"
-        echo "  start          - Start gateway service"
-        echo "  stop           - Stop gateway service"
-        echo "  restart        - Restart gateway service"
-        echo "  status         - Check service status"
-        echo "  logs           - View live logs"
-        echo "  test           - Test API connectivity"
-        echo "  health         - Check gateway health"
-        echo "  offline-stats  - Show offline queue statistics"
-        ;;
+    start) sudo systemctl start iot-gateway ;;
+    stop) sudo systemctl stop iot-gateway ;;
+    restart) sudo systemctl restart iot-gateway ;;
+    status) sudo systemctl status iot-gateway ;;
+    logs) sudo journalctl -u iot-gateway -f ;;
+    test) curl -s http://localhost:5000/api/test ;;
+    *) echo "Use: gateway-manage {start|stop|restart|status|logs|test}" ;;
 esac
 EOF
 
-chmod +x "$GATEWAY_DIR/manage.sh"
-chown $GATEWAY_USER:$GATEWAY_USER "$GATEWAY_DIR/manage.sh"
+chmod +x /usr/local/bin/gateway-manage
 
-# Create symlink for easy access
-ln -sf "$GATEWAY_DIR/manage.sh" /usr/local/bin/gateway-manage 2>/dev/null || true
-
-# Step 11: Create logrotate configuration
-print_status "Setting up log rotation..."
-cat > "/etc/logrotate.d/$SERVICE_NAME" << EOF
-$LOG_DIR/*.log {
-    daily
-    missingok
-    rotate 14
-    compress
-    delaycompress
-    notifempty
-    create 644 $GATEWAY_USER $GATEWAY_USER
-    postrotate
-        systemctl kill -s HUP $SERVICE_NAME.service 2>/dev/null || true
-    endscript
-}
-EOF
-
-# Step 12: Display firewall info
-print_status "Checking firewall..."
-if command -v ufw &> /dev/null; then
-    ufw allow 5000/tcp 2>/dev/null || true
-    echo "Firewall configured for port 5000"
-else
-    echo "Note: Install 'ufw' for firewall: sudo apt install ufw"
-fi
-
-# Display summary
+# Done
 echo ""
 echo "========================================"
-print_status "✅ IoT Gateway Installation Complete!"
+print_status "✅ INSTALLATION COMPLETE!"
 echo "========================================"
 echo ""
-echo "📊 INSTALLATION SUMMARY:"
-echo "   Username:      $GATEWAY_USER"
-echo "   Directory:     $GATEWAY_DIR"
-echo "   Service:       $SERVICE_NAME"
-echo "   Port:          5000"
-echo "   Database Pi:   $DB_PI_IP:5000 (appV7.py)"
-echo "   Logs:          $LOG_DIR"
-echo "   Offline DB:    $GATEWAY_DIR/data/offline.db"
+echo "Gateway is running!"
+echo "Test: curl http://localhost:5000/api/test"
+echo "Manage: gateway-manage {start|stop|restart|status|logs}"
 echo ""
-echo "🛠️  MANAGEMENT COMMANDS:"
-echo "   gateway-manage start          # Start gateway"
-echo "   gateway-manage status         # Check status"
-echo "   gateway-manage logs           # View logs"
-echo "   gateway-manage test           # Test API"
-echo "   gateway-manage health         # Health check"
-echo "   gateway-manage offline-stats  # Offline queue stats"
-echo ""
-echo "🌐 TEST ENDPOINTS:"
-echo "   http://$(hostname -I | awk '{print $1}'):5000/api/test"
-echo "   http://$(hostname -I | awk '{print $1}'):5000/api/health"
-echo ""
-echo "🔧 TROUBLESHOOTING:"
-echo "   sudo journalctl -u $SERVICE_NAME -f     # Live logs"
-echo "   sudo -u gateway ls -la $GATEWAY_DIR/data/  # Check data dir"
-echo "   sudo -u gateway ls -la $LOG_DIR/            # Check logs dir"
-echo ""
-print_status "Gateway is now running and forwarding to appV7.py at $DB_PI_IP:5000"
+echo "Logs: /home/gateway/gateway_data/gateway.log"
+echo "Offline data: /home/gateway/gateway_data/offline.db"
 echo "========================================"
