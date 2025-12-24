@@ -50,7 +50,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/home/pi/gateway_data/gateway.log'),
+        logging.FileHandler('/home/gateway/gateway_data/gateway.log'),
         logging.StreamHandler()
     ]
 )
@@ -562,3 +562,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
