@@ -1,10 +1,10 @@
 #!/bin/bash
-# IoT Gateway Installer - FIXED VERSION
+# IoT Gateway Installer - FULLY UPDATED VERSION
 
 set -e
 
 echo "========================================"
-echo "🚀 IoT Gateway Installation (Fixed)"
+echo "🚀 IoT Gateway Installation (Updated)"
 echo "========================================"
 
 GATEWAY_USER="gateway"
@@ -56,7 +56,7 @@ if [ -d "$GATEWAY_DIR" ]; then
     rm -rf "$GATEWAY_DIR"
 fi
 
-# Create all necessary directories
+# Create all necessary directories FIRST
 mkdir -p "$GATEWAY_DIR"
 mkdir -p "$GATEWAY_DIR/data"
 mkdir -p "$LOG_DIR"
@@ -64,12 +64,13 @@ mkdir -p "$LOG_DIR"
 # Set correct ownership
 chown -R $GATEWAY_USER:$GATEWAY_USER "$GATEWAY_DIR"
 chown -R $GATEWAY_USER:$GATEWAY_USER "$LOG_DIR"
+chmod 755 "$LOG_DIR"
 
-# Step 5: Create fixed gateway.py with correct log path
+# Step 5: Create UPDATED gateway.py with correct paths
 print_status "Creating gateway code..."
 cat > "$GATEWAY_DIR/gateway.py" << 'EOF'
 """
-IoT Forwarding Gateway - Fixed Version
+IoT Forwarding Gateway - UPDATED VERSION
 """
 from flask import Flask, request, jsonify
 import requests
@@ -81,15 +82,24 @@ from threading import Thread
 import time
 import os
 
+# ========================
+# CONFIGURATION
+# ========================
 DATABASE_PI_URL = "http://192.168.1.95:5000"  # appV7.py
 OFFLINE_DB = "/home/gateway/iot-gateway/data/offline.db"
-LOG_FILE = "/var/log/iot-gateway/gateway.log"
+LOG_DIR = "/var/log/iot-gateway"
+LOG_FILE = f"{LOG_DIR}/gateway.log"
 PORT = 5000
 
+# ========================
+# APPLICATION SETUP
+# ========================
 app = Flask(__name__)
 
-# Setup logging with file handler
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+# Create log directory FIRST before setting up logging
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -100,10 +110,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Statistics
 stats = {'received': 0, 'forwarded': 0, 'offline': 0}
 
+# ========================
+# DATABASE FUNCTIONS
+# ========================
 def init_offline_db():
-    os.makedirs(os.path.dirname(OFFLINE_DB), exist_ok=True)
+    """Initialize offline SQLite database"""
+    # Create directory for offline DB
+    db_dir = os.path.dirname(OFFLINE_DB)
+    os.makedirs(db_dir, exist_ok=True)
+    
     conn = sqlite3.connect(OFFLINE_DB)
     c = conn.cursor()
     c.execute('''
@@ -121,6 +139,7 @@ def init_offline_db():
     logger.info(f"Offline database initialized: {OFFLINE_DB}")
 
 def save_offline(endpoint, data):
+    """Save request to offline queue"""
     try:
         conn = sqlite3.connect(OFFLINE_DB)
         c = conn.cursor()
@@ -136,6 +155,7 @@ def save_offline(endpoint, data):
         return False
 
 def forward_offline():
+    """Process offline queue in background"""
     try:
         conn = sqlite3.connect(OFFLINE_DB)
         conn.row_factory = sqlite3.Row
@@ -160,9 +180,13 @@ def forward_offline():
                     stats['forwarded'] += 1
                     logger.info(f"Successfully forwarded offline record {record['id']}")
                 else:
-                    c.execute('UPDATE queue SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?', (record['id'],))
+                    c.execute('UPDATE queue SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?', 
+                             (record['id'],))
+                    logger.warning(f"Offline record {record['id']} failed: Status {response.status_code}")
             except Exception as e:
-                c.execute('UPDATE queue SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?', (record['id'],))
+                c.execute('UPDATE queue SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?', 
+                         (record['id'],))
+                logger.warning(f"Offline record {record['id']} error: {e}")
         
         conn.commit()
         conn.close()
@@ -170,6 +194,7 @@ def forward_offline():
         logger.error(f"Error processing offline queue: {e}")
 
 def forward_to_database(endpoint, data):
+    """Forward request to Database Pi"""
     try:
         response = requests.post(
             f"{DATABASE_PI_URL}{endpoint}",
@@ -187,8 +212,12 @@ def forward_to_database(endpoint, data):
         logger.warning(f"Forward failed: {e}")
         return False, None
 
+# ========================
+# API ENDPOINTS
+# ========================
 @app.route('/api/sensor-data', methods=['POST'])
 def handle_sensor_data():
+    """Receive sensor data and forward to Database Pi"""
     stats['received'] += 1
     try:
         data = request.json
@@ -215,6 +244,7 @@ def handle_sensor_data():
 
 @app.route('/api/sensors/register', methods=['POST'])
 def handle_register():
+    """Handle sensor registration"""
     stats['received'] += 1
     try:
         data = request.json
@@ -241,6 +271,7 @@ def handle_register():
 
 @app.route('/api/sensors/<machine_id>/assignment', methods=['GET'])
 def handle_assignment(machine_id):
+    """Check sensor assignment status"""
     try:
         logger.info(f"Assignment check for sensor {machine_id}")
         response = requests.get(
@@ -261,6 +292,7 @@ def handle_assignment(machine_id):
 
 @app.route('/api/test', methods=['GET'])
 def test():
+    """Test gateway connectivity"""
     db_status = "unknown"
     try:
         response = requests.get(f"{DATABASE_PI_URL}/api/test", timeout=5)
@@ -277,6 +309,7 @@ def test():
 
 @app.route('/api/health', methods=['GET'])
 def health():
+    """Comprehensive health check"""
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -284,28 +317,39 @@ def health():
         "database_url": DATABASE_PI_URL
     })
 
+# ========================
+# BACKGROUND WORKER
+# ========================
 def background_worker():
+    """Background thread for processing offline queue"""
     while True:
-        time.sleep(60)
+        time.sleep(60)  # Check every minute
         try:
             forward_offline()
         except Exception as e:
             logger.error(f"Background worker error: {e}")
 
+# ========================
+# MAIN APPLICATION
+# ========================
 if __name__ == '__main__':
     print("=" * 60)
     print("🚀 IoT Gateway Starting")
+    print(f"   User: gateway")
     print(f"   Host: 0.0.0.0:{PORT}")
     print(f"   Database Pi: {DATABASE_PI_URL}")
     print(f"   Offline Storage: {OFFLINE_DB}")
     print(f"   Log File: {LOG_FILE}")
     print("=" * 60)
     
+    # Initialize databases and directories
     init_offline_db()
     
+    # Start background worker
     worker = Thread(target=background_worker, daemon=True)
     worker.start()
     
+    # Start Flask application
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
 EOF
 
@@ -317,11 +361,6 @@ print_status "Setting permissions..."
 chown -R $GATEWAY_USER:$GATEWAY_USER "$GATEWAY_DIR"
 chmod 755 "$GATEWAY_DIR"
 chmod 644 "$GATEWAY_DIR/gateway.py"
-
-# Create log directory with correct permissions
-mkdir -p "$LOG_DIR"
-chown $GATEWAY_USER:$GATEWAY_USER "$LOG_DIR"
-chmod 755 "$LOG_DIR"
 
 # Step 7: Create systemd service
 print_status "Creating systemd service..."
@@ -375,8 +414,11 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     echo ""
     print_status "Testing API endpoint..."
     sleep 2
-    curl -s http://localhost:5000/api/test | python3 -m json.tool 2>/dev/null || \
-        echo "API test failed - check logs"
+    if curl -s http://localhost:5000/api/test | python3 -m json.tool 2>/dev/null; then
+        print_status "✅ API test successful!"
+    else
+        print_error "API test failed - check logs"
+    fi
 else
     print_error "Failed to start gateway"
     echo ""
@@ -457,6 +499,15 @@ $LOG_DIR/*.log {
 }
 EOF
 
+# Step 12: Display firewall info
+print_status "Checking firewall..."
+if command -v ufw &> /dev/null; then
+    ufw allow 5000/tcp 2>/dev/null || true
+    echo "Firewall configured for port 5000"
+else
+    echo "Note: Install 'ufw' for firewall: sudo apt install ufw"
+fi
+
 # Display summary
 echo ""
 echo "========================================"
@@ -489,5 +540,5 @@ echo "   sudo journalctl -u $SERVICE_NAME -f     # Live logs"
 echo "   sudo -u gateway ls -la $GATEWAY_DIR/data/  # Check data dir"
 echo "   sudo -u gateway ls -la $LOG_DIR/            # Check logs dir"
 echo ""
-print_status "Gateway should now be running and forwarding to appV7.py at $DB_PI_IP:5000"
+print_status "Gateway is now running and forwarding to appV7.py at $DB_PI_IP:5000"
 echo "========================================"
