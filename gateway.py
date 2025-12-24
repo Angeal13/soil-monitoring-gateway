@@ -22,7 +22,7 @@ class Config:
     GATEWAY_PORT = 5000  # MUST be 5000 (sensors expect this)
     
     # Database Pi (appV8.py) - UPDATE THIS!
-    DATABASE_PI_URL = "http://192.168.1.76:5000"
+    DATABASE_PI_URL = "http://192.168.1.95:5000"
     
     # Local offline storage
     OFFLINE_STORAGE_PATH = '/home/pi/gateway_data/offline_queue.db'
