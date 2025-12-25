@@ -1,6 +1,7 @@
 """
-Gateway Pi - Simple Forwarding Gateway
-Routes sensor data to Database Pi (appV8.py)
+Gateway Pi - Enhanced Gateway with Direct MySQL Access
+Routes sensor data directly to MySQL database
+Uses API for assignment checks and registration
 """
 from flask import Flask, request, jsonify
 import requests
@@ -10,8 +11,9 @@ import sqlite3
 import json
 from datetime import datetime
 from threading import Thread
-from queue import Queue
 import os
+import mysql.connector
+from mysql.connector import pooling, Error
 
 # ========================
 # CONFIGURATION
@@ -21,15 +23,27 @@ class Config:
     GATEWAY_HOST = '0.0.0.0'
     GATEWAY_PORT = 5000  # MUST be 5000 (sensors expect this)
     
-    # Database Pi (appV8.py) - UPDATE THIS!
-    DATABASE_PI_URL = "http://192.168.1.95:5000"
+    # Database Pi (appV7.py) - API URL for non-data operations
+    DATABASE_PI_API_URL = "http://192.168.1.95:5000"
+    
+    # Direct MySQL Configuration
+    DB_CONFIG = {
+        'host': '192.168.1.100',      # MySQL server IP
+        'port': 3306,
+        'database': 'soilmonitornig',
+        'user': 'gateway_user',      # Create this user in MySQL
+        'password': 'gateway_pass',  # Change this!
+        'pool_name': 'gateway_pool',
+        'pool_size': 5,
+        'pool_reset_session': True
+    }
     
     # Local offline storage
     OFFLINE_STORAGE_PATH = '/home/pi/gateway_data/offline_queue.db'
     MAX_OFFLINE_RECORDS = 10000
     
     # Forwarding settings
-    FORWARD_TIMEOUT = 10  # seconds
+    API_TIMEOUT = 10  # seconds for API calls
     MAX_RETRIES = 3
     RETRY_DELAY = 5  # seconds
     
@@ -41,6 +55,172 @@ class Config:
     BATCH_INTERVAL = 60  # Process offline data every 60 seconds
 
 # ========================
+# DATABASE MANAGER
+# ========================
+class DatabaseManager:
+    _connection_pool = None
+    
+    @classmethod
+    def initialize_pool(cls):
+        """Initialize MySQL connection pool"""
+        try:
+            cls._connection_pool = pooling.MySQLConnectionPool(
+                pool_name=Config.DB_CONFIG['pool_name'],
+                pool_size=Config.DB_CONFIG['pool_size'],
+                pool_reset_session=Config.DB_CONFIG['pool_reset_session'],
+                host=Config.DB_CONFIG['host'],
+                port=Config.DB_CONFIG['port'],
+                database=Config.DB_CONFIG['database'],
+                user=Config.DB_CONFIG['user'],
+                password=Config.DB_CONFIG['password']
+            )
+            
+            # Test connection
+            conn = cls.get_connection()
+            if conn.is_connected():
+                logging.info("✅ MySQL connection pool initialized successfully")
+                conn.close()
+                return True
+            else:
+                logging.error("❌ MySQL pool initialization failed")
+                return False
+                
+        except Error as e:
+            logging.error(f"❌ MySQL pool initialization error: {e}")
+            cls._connection_pool = None
+            return False
+    
+    @classmethod
+    def get_connection(cls):
+        """Get connection from pool"""
+        if not cls._connection_pool:
+            if not cls.initialize_pool():
+                raise Exception("Database connection pool not available")
+        
+        try:
+            return cls._connection_pool.get_connection()
+        except Error as e:
+            logging.error(f"❌ Failed to get database connection: {e}")
+            raise
+    
+    @classmethod
+    def get_sensor_assignment(cls, machine_id):
+        """Get sensor assignment info from database"""
+        query = """
+            SELECT 
+                s.machine_id,
+                s.farm_id,
+                s.zone_code,
+                s.installation,
+                f.farm_name,
+                c.client_name,
+                c.client_id
+            FROM sensors s
+            LEFT JOIN farms f ON s.farm_id = f.farm_id
+            LEFT JOIN client c ON f.client_id = c.client_id
+            WHERE s.machine_id = %s
+        """
+        
+        conn = None
+        cursor = None
+        try:
+            conn = cls.get_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(query, (machine_id,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return None
+            
+            return {
+                'machine_id': machine_id,
+                'assigned': result['farm_id'] is not None,
+                'farm_id': result['farm_id'],
+                'zone_code': result['zone_code'],
+                'installation_date': result['installation'],
+                'farm_name': result['farm_name'],
+                'client_id': result['client_id'],
+                'client_name': result['client_name']
+            }
+            
+        except Error as e:
+            logging.error(f"Database error getting sensor assignment: {e}")
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+    
+    @classmethod
+    def insert_sensor_data(cls, data):
+        """Insert sensor data directly into MySQL"""
+        query = """
+            INSERT INTO sensor_data 
+            (farm_id, zone_code, machine_id, timestamp, moisture, temperature, 
+             conductivity, ph, nitrogen, phosphorus, potassium) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        # First, get farm_id and zone_code for this sensor
+        assignment_info = cls.get_sensor_assignment(data['machine_id'])
+        
+        if not assignment_info or not assignment_info['assigned']:
+            raise Exception(f"Sensor {data['machine_id']} is not assigned to any farm/zone")
+        
+        values = (
+            assignment_info['farm_id'],
+            assignment_info['zone_code'],
+            data['machine_id'],
+            data.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+            data.get('moisture', 0),
+            data.get('temperature', 0),
+            data.get('conductivity', 0),
+            data.get('ph', 0),
+            data.get('nitrogen', 0),
+            data.get('phosphorus', 0),
+            data.get('potassium', 0)
+        )
+        
+        conn = None
+        cursor = None
+        try:
+            conn = cls.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, values)
+            conn.commit()
+            
+            inserted_id = cursor.lastrowid
+            logging.info(f"✅ Sensor data inserted into MySQL (ID: {inserted_id})")
+            return inserted_id
+            
+        except Error as e:
+            logging.error(f"❌ MySQL insert error: {e}")
+            if conn:
+                conn.rollback()
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+    
+    @classmethod
+    def check_health(cls):
+        """Check MySQL database health"""
+        try:
+            conn = cls.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            return result[0] == 1
+        except Error as e:
+            logging.error(f"MySQL health check failed: {e}")
+            return False
+
+# ========================
 # APPLICATION SETUP
 # ========================
 app = Flask(__name__)
@@ -50,7 +230,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/home/gateway/gateway_data/gateway.log'),
+        logging.FileHandler('/home/pi/gateway_data/gateway.log'),
         logging.StreamHandler()
     ]
 )
@@ -60,12 +240,16 @@ logger = logging.getLogger(__name__)
 gateway_stats = {
     'start_time': datetime.now(),
     'requests_received': 0,
-    'forwarded_success': 0,
-    'forwarded_failed': 0,
+    'mysql_inserts': 0,
+    'mysql_errors': 0,
+    'api_calls': 0,
+    'api_errors': 0,
     'stored_offline': 0,
     'offline_synced': 0,
-    'last_database_check': None,
-    'database_available': False
+    'last_mysql_check': None,
+    'mysql_available': False,
+    'last_api_check': None,
+    'api_available': False
 }
 
 # ========================
@@ -83,7 +267,6 @@ class OfflineStorage:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Create offline queue table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS offline_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,16 +274,8 @@ class OfflineStorage:
                 data TEXT NOT NULL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 attempts INTEGER DEFAULT 0,
-                last_attempt DATETIME
-            )
-        ''')
-        
-        # Create stats table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS gateway_stats (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                last_attempt DATETIME,
+                destination TEXT NOT NULL CHECK(destination IN ('mysql', 'api'))
             )
         ''')
         
@@ -108,16 +283,16 @@ class OfflineStorage:
         conn.close()
         logger.info(f"Offline storage initialized: {self.db_path}")
     
-    def save_offline(self, endpoint, data):
+    def save_offline(self, endpoint, data, destination):
         """Save request to offline queue"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         try:
             cursor.execute('''
-                INSERT INTO offline_queue (endpoint, data)
-                VALUES (?, ?)
-            ''', (endpoint, json.dumps(data)))
+                INSERT INTO offline_queue (endpoint, data, destination)
+                VALUES (?, ?, ?)
+            ''', (endpoint, json.dumps(data), destination))
             
             conn.commit()
             record_id = cursor.lastrowid
@@ -127,7 +302,6 @@ class OfflineStorage:
             count = cursor.fetchone()[0]
             
             if count > Config.MAX_OFFLINE_RECORDS:
-                # Remove oldest records
                 cursor.execute('''
                     DELETE FROM offline_queue 
                     WHERE id IN (
@@ -139,7 +313,7 @@ class OfflineStorage:
                 conn.commit()
                 logger.warning(f"Offline queue trimmed to {Config.MAX_OFFLINE_RECORDS} records")
             
-            logger.info(f"Saved to offline queue: {endpoint} (ID: {record_id})")
+            logger.info(f"Saved to offline queue: {endpoint} (Dest: {destination}, ID: {record_id})")
             return record_id
             
         except Exception as e:
@@ -148,7 +322,7 @@ class OfflineStorage:
         finally:
             conn.close()
     
-    def get_pending_records(self, limit=50):
+    def get_pending_records(self, destination, limit=50):
         """Get pending records for retry"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -156,10 +330,10 @@ class OfflineStorage:
         
         cursor.execute('''
             SELECT * FROM offline_queue 
-            WHERE attempts < ?
+            WHERE attempts < ? AND destination = ?
             ORDER BY timestamp ASC 
             LIMIT ?
-        ''', (Config.MAX_RETRIES, limit))
+        ''', (Config.MAX_RETRIES, destination, limit))
         
         records = cursor.fetchall()
         conn.close()
@@ -172,11 +346,9 @@ class OfflineStorage:
         cursor = conn.cursor()
         
         if success:
-            # Delete successful record
             cursor.execute('DELETE FROM offline_queue WHERE id = ?', (record_id,))
             logger.info(f"Removed synced record: {record_id}")
         else:
-            # Increment attempt count
             cursor.execute('''
                 UPDATE offline_queue 
                 SET attempts = attempts + 1, 
@@ -184,7 +356,6 @@ class OfflineStorage:
                 WHERE id = ?
             ''', (record_id,))
             
-            # Get new attempt count
             cursor.execute('SELECT attempts FROM offline_queue WHERE id = ?', (record_id,))
             attempts = cursor.fetchone()[0]
             
@@ -193,89 +364,105 @@ class OfflineStorage:
         
         conn.commit()
         conn.close()
-    
-    def get_queue_stats(self):
-        """Get offline queue statistics"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT 
-                COUNT(*) as total,
-                COUNT(CASE WHEN attempts = 0 THEN 1 END) as pending,
-                COUNT(CASE WHEN attempts >= ? THEN 1 END) as failed
-            FROM offline_queue
-        ''', (Config.MAX_RETRIES,))
-        
-        stats = cursor.fetchone()
-        conn.close()
-        
-        return {
-            'total': stats[0],
-            'pending': stats[1],
-            'failed': stats[2]
-        }
 
-# Initialize offline storage
+# Initialize components
 offline_storage = OfflineStorage(Config.OFFLINE_STORAGE_PATH)
 
 # ========================
-# DATABASE HEALTH CHECK
+# HEALTH CHECKS
 # ========================
-def check_database_health():
-    """Check if Database Pi is reachable"""
+def check_mysql_health():
+    """Check if MySQL is reachable"""
     try:
-        response = requests.get(
-            f"{Config.DATABASE_PI_URL}/api/test",
-            timeout=5
-        )
-        gateway_stats['database_available'] = (response.status_code == 200)
-        gateway_stats['last_database_check'] = datetime.now()
+        gateway_stats['mysql_available'] = DatabaseManager.check_health()
+        gateway_stats['last_mysql_check'] = datetime.now()
         
-        if gateway_stats['database_available']:
-            logger.info("✅ Database Pi is reachable")
+        if gateway_stats['mysql_available']:
+            logger.info("✅ MySQL database is reachable")
         else:
-            logger.warning(f"Database Pi returned status {response.status_code}")
+            logger.warning("MySQL database not reachable")
             
-        return gateway_stats['database_available']
+        return gateway_stats['mysql_available']
         
     except Exception as e:
-        gateway_stats['database_available'] = False
-        gateway_stats['last_database_check'] = datetime.now()
-        logger.warning(f"Database Pi not reachable: {e}")
+        gateway_stats['mysql_available'] = False
+        gateway_stats['last_mysql_check'] = datetime.now()
+        logger.warning(f"MySQL not reachable: {e}")
+        return False
+
+def check_api_health():
+    """Check if Database Pi API is reachable"""
+    try:
+        response = requests.get(
+            f"{Config.DATABASE_PI_API_URL}/api/test",
+            timeout=5
+        )
+        gateway_stats['api_available'] = (response.status_code == 200)
+        gateway_stats['last_api_check'] = datetime.now()
+        
+        if gateway_stats['api_available']:
+            logger.info("✅ Database Pi API is reachable")
+        else:
+            logger.warning(f"Database Pi API returned status {response.status_code}")
+            
+        return gateway_stats['api_available']
+        
+    except Exception as e:
+        gateway_stats['api_available'] = False
+        gateway_stats['last_api_check'] = datetime.now()
+        logger.warning(f"Database Pi API not reachable: {e}")
         return False
 
 # ========================
-# FORWARDING FUNCTIONS
+# REQUEST PROCESSING
 # ========================
-def forward_to_database(endpoint, data, method='POST'):
-    """Forward request to Database Pi"""
-    url = f"{Config.DATABASE_PI_URL}{endpoint}"
+def call_api(endpoint, data, method='POST'):
+    """Call Database Pi API"""
+    url = f"{Config.DATABASE_PI_API_URL}{endpoint}"
     
     for attempt in range(Config.MAX_RETRIES):
         try:
             if method == 'POST':
-                response = requests.post(url, json=data, timeout=Config.FORWARD_TIMEOUT)
+                response = requests.post(url, json=data, timeout=Config.API_TIMEOUT)
             else:  # GET
-                response = requests.get(url, timeout=Config.FORWARD_TIMEOUT)
+                response = requests.get(url, timeout=Config.API_TIMEOUT)
             
-            # Log the response for debugging
-            logger.debug(f"Forward {endpoint}: Status {response.status_code}")
+            logger.debug(f"API {endpoint}: Status {response.status_code}")
             
             if response.status_code in [200, 201]:
-                gateway_stats['forwarded_success'] += 1
+                gateway_stats['api_calls'] += 1
                 return True, response.json()
             else:
-                logger.warning(f"Forward {endpoint} failed: Status {response.status_code}")
+                logger.warning(f"API {endpoint} failed: Status {response.status_code}")
                 time.sleep(Config.RETRY_DELAY)
                 
         except Exception as e:
-            logger.warning(f"Forward attempt {attempt + 1} failed: {e}")
+            logger.warning(f"API attempt {attempt + 1} failed: {e}")
             if attempt < Config.MAX_RETRIES - 1:
                 time.sleep(Config.RETRY_DELAY)
     
-    gateway_stats['forwarded_failed'] += 1
+    gateway_stats['api_errors'] += 1
     return False, None
+
+def process_sensor_data(data):
+    """Process sensor data - try MySQL first, fallback to offline storage"""
+    try:
+        # Try direct MySQL insert
+        inserted_id = DatabaseManager.insert_sensor_data(data)
+        gateway_stats['mysql_inserts'] += 1
+        return True, {'mysql_id': inserted_id}
+        
+    except Exception as e:
+        logger.warning(f"MySQL insert failed, saving offline: {e}")
+        gateway_stats['mysql_errors'] += 1
+        
+        # Save to offline storage
+        record_id = offline_storage.save_offline('/api/sensor-data', data, 'mysql')
+        if record_id:
+            gateway_stats['stored_offline'] += 1
+            return False, {'offline_id': record_id, 'message': 'Data saved offline'}
+        
+        return False, {'error': 'Failed to save data'}
 
 def process_offline_queue():
     """Process offline queue in background"""
@@ -283,34 +470,44 @@ def process_offline_queue():
         try:
             time.sleep(Config.BATCH_INTERVAL)
             
-            # Check database health first
-            if not check_database_health():
-                logger.info("Database unavailable, skipping offline sync")
-                continue
+            # Process MySQL-bound records
+            if check_mysql_health():
+                mysql_records = offline_storage.get_pending_records('mysql', Config.BATCH_SIZE)
+                if mysql_records:
+                    logger.info(f"Processing {len(mysql_records)} offline MySQL records")
+                    
+                    for record in mysql_records:
+                        record_id = record['id']
+                        data = json.loads(record['data'])
+                        
+                        try:
+                            inserted_id = DatabaseManager.insert_sensor_data(data)
+                            offline_storage.update_attempt(record_id, True)
+                            gateway_stats['offline_synced'] += 1
+                            logger.info(f"Synced offline record {record_id} to MySQL")
+                        except Exception as e:
+                            offline_storage.update_attempt(record_id, False)
+                            logger.error(f"Failed to sync offline record {record_id}: {e}")
             
-            # Get pending records
-            records = offline_storage.get_pending_records(Config.BATCH_SIZE)
-            
-            if not records:
-                continue
-            
-            logger.info(f"Processing {len(records)} offline records")
-            synced_count = 0
-            
-            for record in records:
-                record_id = record['id']
-                endpoint = record['endpoint']
-                data = json.loads(record['data'])
-                
-                success, _ = forward_to_database(endpoint, data)
-                offline_storage.update_attempt(record_id, success)
-                
-                if success:
-                    synced_count += 1
-                    gateway_stats['offline_synced'] += 1
-            
-            if synced_count > 0:
-                logger.info(f"Synced {synced_count} offline records to Database Pi")
+            # Process API-bound records
+            if check_api_health():
+                api_records = offline_storage.get_pending_records('api', Config.BATCH_SIZE)
+                if api_records:
+                    logger.info(f"Processing {len(api_records)} offline API records")
+                    
+                    for record in api_records:
+                        record_id = record['id']
+                        endpoint = record['endpoint']
+                        data = json.loads(record['data'])
+                        
+                        success, response = call_api(endpoint, data)
+                        offline_storage.update_attempt(record_id, success)
+                        
+                        if success:
+                            gateway_stats['offline_synced'] += 1
+                            logger.info(f"Synced offline record {record_id} to API")
+                        else:
+                            logger.error(f"Failed to sync offline API record {record_id}")
             
         except Exception as e:
             logger.error(f"Error processing offline queue: {e}")
@@ -319,27 +516,30 @@ def process_offline_queue():
 # ========================
 # API ENDPOINTS
 # ========================
-
 @app.route('/api/test', methods=['GET'])
 def test_gateway():
     """Test gateway connectivity"""
-    db_status = "unknown"
-    try:
-        response = requests.get(f"{Config.DATABASE_PI_URL}/api/test", timeout=5)
-        db_status = "connected" if response.status_code == 200 else f"error_{response.status_code}"
-    except:
-        db_status = "disconnected"
+    mysql_status = "unknown"
+    api_status = "unknown"
+    
+    mysql_status = "connected" if check_mysql_health() else "disconnected"
+    api_status = "connected" if check_api_health() else "disconnected"
     
     return jsonify({
         "gateway": "online",
         "timestamp": datetime.now().isoformat(),
-        "database_pi": db_status,
-        "database_url": Config.DATABASE_PI_URL
+        "mysql": mysql_status,
+        "api": api_status,
+        "mysql_config": {
+            "host": Config.DB_CONFIG['host'],
+            "database": Config.DB_CONFIG['database']
+        },
+        "api_url": Config.DATABASE_PI_API_URL
     })
 
 @app.route('/api/sensor-data', methods=['POST'])
 def handle_sensor_data():
-    """Receive sensor data and forward to Database Pi"""
+    """Receive sensor data and store in MySQL"""
     gateway_stats['requests_received'] += 1
     
     try:
@@ -353,26 +553,25 @@ def handle_sensor_data():
         
         logger.info(f"Received data from sensor {machine_id}")
         
-        # Try to forward immediately
-        success, response = forward_to_database('/api/sensor-data', data)
+        # Process data (try MySQL first)
+        success, result = process_sensor_data(data)
         
         if success:
-            logger.info(f"Data forwarded for sensor {machine_id}")
+            logger.info(f"Data stored in MySQL for sensor {machine_id}")
             return jsonify({
-                "status": "forwarded",
-                "message": "Data forwarded to Database Pi",
+                "status": "stored",
+                "message": "Data stored directly in MySQL database",
+                "mysql_id": result.get('mysql_id'),
                 "timestamp": datetime.now().isoformat()
             })
         else:
-            # Save to offline storage
-            record_id = offline_storage.save_offline('/api/sensor-data', data)
-            if record_id:
-                gateway_stats['stored_offline'] += 1
-                logger.info(f"Data saved offline for sensor {machine_id} (Record: {record_id})")
+            # Data was saved offline
+            if 'offline_id' in result:
+                logger.info(f"Data saved offline for sensor {machine_id} (Record: {result['offline_id']})")
                 return jsonify({
                     "status": "stored_offline",
-                    "message": "Database Pi unavailable, data stored locally",
-                    "offline_id": record_id,
+                    "message": "MySQL unavailable, data stored locally",
+                    "offline_id": result['offline_id'],
                     "timestamp": datetime.now().isoformat()
                 }), 202
             else:
@@ -384,7 +583,7 @@ def handle_sensor_data():
 
 @app.route('/api/sensors/register', methods=['POST'])
 def handle_sensor_registration():
-    """Handle sensor registration"""
+    """Handle sensor registration via API"""
     gateway_stats['requests_received'] += 1
     
     try:
@@ -398,15 +597,15 @@ def handle_sensor_registration():
         
         logger.info(f"Registration request for sensor {machine_id}")
         
-        # Try to forward immediately
-        success, response = forward_to_database('/api/sensors/register', data)
+        # Try to call API
+        success, response = call_api('/api/sensors/register', data)
         
         if success:
-            logger.info(f"Registration forwarded for sensor {machine_id}")
+            logger.info(f"Registration completed for sensor {machine_id}")
             return jsonify(response), 200
         else:
             # Save to offline storage
-            record_id = offline_storage.save_offline('/api/sensors/register', data)
+            record_id = offline_storage.save_offline('/api/sensors/register', data, 'api')
             if record_id:
                 gateway_stats['stored_offline'] += 1
                 logger.info(f"Registration saved offline for sensor {machine_id}")
@@ -425,33 +624,43 @@ def handle_sensor_registration():
 
 @app.route('/api/sensors/<machine_id>/assignment', methods=['GET'])
 def handle_assignment_check(machine_id):
-    """Check sensor assignment status"""
+    """Check sensor assignment status via API"""
     gateway_stats['requests_received'] += 1
     
     logger.info(f"Assignment check for sensor {machine_id}")
     
-    # Try to forward immediately
-    success, response = forward_to_database(f'/api/sensors/{machine_id}/assignment', None, method='GET')
+    # Try to call API
+    success, response = call_api(f'/api/sensors/{machine_id}/assignment', None, method='GET')
     
     if success:
         return jsonify(response), 200
     else:
-        # For GET requests, we can't queue them - just return cached/error response
-        logger.warning(f"Could not check assignment for {machine_id}, Database Pi unavailable")
-        return jsonify({
-            "error": "Database Pi unavailable",
-            "machine_id": machine_id,
-            "suggestion": "Retry later or check gateway status"
-        }), 503
+        # For GET requests, try direct database check as fallback
+        try:
+            assignment_info = DatabaseManager.get_sensor_assignment(machine_id)
+            if assignment_info:
+                return jsonify(assignment_info), 200
+            else:
+                return jsonify({
+                    "error": "Sensor not found",
+                    "machine_id": machine_id
+                }), 404
+        except Exception as e:
+            logger.warning(f"Could not check assignment for {machine_id}: {e}")
+            return jsonify({
+                "error": "API and database unavailable",
+                "machine_id": machine_id,
+                "suggestion": "Retry later"
+            }), 503
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Comprehensive health check"""
-    queue_stats = offline_storage.get_queue_stats()
     uptime = datetime.now() - gateway_stats['start_time']
     
-    # Check database health
-    db_healthy = check_database_health()
+    # Check health
+    mysql_healthy = check_mysql_health()
+    api_healthy = check_api_health()
     
     health_data = {
         "gateway": {
@@ -459,64 +668,59 @@ def health_check():
             "uptime_seconds": int(uptime.total_seconds()),
             "start_time": gateway_stats['start_time'].isoformat(),
             "requests_received": gateway_stats['requests_received'],
-            "forwarded_success": gateway_stats['forwarded_success'],
-            "forwarded_failed": gateway_stats['forwarded_failed'],
+            "mysql_inserts": gateway_stats['mysql_inserts'],
+            "mysql_errors": gateway_stats['mysql_errors'],
+            "api_calls": gateway_stats['api_calls'],
+            "api_errors": gateway_stats['api_errors'],
             "stored_offline": gateway_stats['stored_offline'],
             "offline_synced": gateway_stats['offline_synced']
         },
-        "database_pi": {
-            "url": Config.DATABASE_PI_URL,
-            "available": db_healthy,
-            "last_check": gateway_stats['last_database_check'].isoformat() if gateway_stats['last_database_check'] else None
+        "mysql": {
+            "host": Config.DB_CONFIG['host'],
+            "database": Config.DB_CONFIG['database'],
+            "available": mysql_healthy,
+            "last_check": gateway_stats['last_mysql_check'].isoformat() if gateway_stats['last_mysql_check'] else None
         },
-        "offline_storage": {
-            "path": Config.OFFLINE_STORAGE_PATH,
-            "total_records": queue_stats['total'],
-            "pending_records": queue_stats['pending'],
-            "failed_records": queue_stats['failed'],
-            "max_records": Config.MAX_OFFLINE_RECORDS
+        "api": {
+            "url": Config.DATABASE_PI_API_URL,
+            "available": api_healthy,
+            "last_check": gateway_stats['last_api_check'].isoformat() if gateway_stats['last_api_check'] else None
         }
     }
     
     return jsonify(health_data)
 
-@app.route('/api/stats', methods=['GET'])
-def get_gateway_stats():
-    """Get gateway statistics"""
-    queue_stats = offline_storage.get_queue_stats()
-    
-    stats = gateway_stats.copy()
-    stats['uptime'] = str(datetime.now() - stats['start_time'])
-    stats['offline_queue'] = queue_stats
-    stats['database_pi_url'] = Config.DATABASE_PI_URL
-    stats['database_available'] = gateway_stats['database_available']
-    
-    return jsonify(stats)
+# ========================
+# DATABASE SETUP UTILITY
+# ========================
+def setup_database_user():
+    """Script to create the gateway user in MySQL"""
+    print("=" * 60)
+    print("MySQL Gateway User Setup")
+    print("=" * 60)
+    print("\nRun these commands in MySQL (as root or admin user):")
+    print("\n1. Create gateway user:")
+    print(f"""
+CREATE USER 'gateway_user'@'{Config.DB_CONFIG['host']}' 
+IDENTIFIED BY 'gateway_pass';
+    """)
+    print("\n2. Grant minimal permissions:")
+    print(f"""
+GRANT INSERT, SELECT ON {Config.DB_CONFIG['database']}.sensor_data 
+TO 'gateway_user'@'{Config.DB_CONFIG['host']}';
 
-@app.route('/api/debug/queue', methods=['GET'])
-def debug_queue():
-    """Debug endpoint to view offline queue (limited)"""
-    limit = request.args.get('limit', 10, type=int)
-    
-    conn = sqlite3.connect(Config.OFFLINE_STORAGE_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT id, endpoint, timestamp, attempts, last_attempt
-        FROM offline_queue 
-        ORDER BY timestamp ASC 
-        LIMIT ?
-    ''', (limit,))
-    
-    records = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    
-    return jsonify({
-        "count": len(records),
-        "records": records,
-        "queue_stats": offline_storage.get_queue_stats()
-    })
+GRANT SELECT ON {Config.DB_CONFIG['database']}.sensors 
+TO 'gateway_user'@'{Config.DB_CONFIG['host']}';
+
+GRANT SELECT ON {Config.DB_CONFIG['database']}.farms 
+TO 'gateway_user'@'{Config.DB_CONFIG['host']}';
+
+GRANT SELECT ON {Config.DB_CONFIG['database']}.client 
+TO 'gateway_user'@'{Config.DB_CONFIG['host']}';
+    """)
+    print("\n3. Flush privileges:")
+    print("FLUSH PRIVILEGES;")
+    print("\n" + "=" * 60)
 
 # ========================
 # MAIN APPLICATION
@@ -524,8 +728,16 @@ def debug_queue():
 def main():
     """Main gateway application entry point"""
     try:
-        # Initial database health check
-        check_database_health()
+        # Display setup reminder
+        print("=" * 60)
+        print("🚀 Enhanced Gateway Pi Starting")
+        print("=" * 60)
+        print("\n⚠️  IMPORTANT: Before starting, ensure MySQL user is created:")
+        setup_database_user()
+        
+        # Initial health checks
+        check_mysql_health()
+        check_api_health()
         
         # Start offline queue processor
         queue_processor = Thread(target=process_offline_queue, daemon=True)
@@ -534,18 +746,23 @@ def main():
         
         # Display startup information
         logger.info("=" * 60)
-        logger.info("🚀 IoT Gateway Starting")
+        logger.info("🚀 Enhanced IoT Gateway Starting")
         logger.info(f"   Host: {Config.GATEWAY_HOST}:{Config.GATEWAY_PORT}")
-        logger.info(f"   Database Pi: {Config.DATABASE_PI_URL}")
+        logger.info(f"   MySQL: {Config.DB_CONFIG['host']}/{Config.DB_CONFIG['database']}")
+        logger.info(f"   API: {Config.DATABASE_PI_API_URL}")
         logger.info(f"   Offline Storage: {Config.OFFLINE_STORAGE_PATH}")
         logger.info("=" * 60)
         logger.info("📡 Endpoints available:")
-        logger.info("   POST /api/sensor-data        - Receive sensor data")
-        logger.info("   POST /api/sensors/register   - Register sensor")
-        logger.info("   GET  /api/sensors/{id}/assignment - Check assignment")
+        logger.info("   POST /api/sensor-data        - Store sensor data (direct to MySQL)")
+        logger.info("   POST /api/sensors/register   - Register sensor (via API)")
+        logger.info("   GET  /api/sensors/{id}/assignment - Check assignment (via API)")
         logger.info("   GET  /api/health             - Health check")
-        logger.info("   GET  /api/stats              - Gateway statistics")
         logger.info("   GET  /api/test               - Connectivity test")
+        logger.info("=" * 60)
+        logger.info("💾 Data Flow:")
+        logger.info("   Sensor Data → Direct MySQL Insert")
+        logger.info("   Registration/Assignment → API Call")
+        logger.info("   Offline Fallback → SQLite → Retry")
         logger.info("=" * 60)
         
         # Start Flask application
@@ -562,4 +779,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
