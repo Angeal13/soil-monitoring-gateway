@@ -28,18 +28,18 @@ class Config:
     
     # Direct MySQL Configuration
     DB_CONFIG = {
-        'host': '192.168.1.100',      # MySQL server IP
+        'host': 'localhost',           # Changed to localhost (installed locally)
         'port': 3306,
         'database': 'soilmonitornig',
-        'user': 'gateway_user',      # Create this user in MySQL
-        'password': 'gateway_pass',  # Change this!
+        'user': 'gateway_user',        # Changed to match installation
+        'password': 'gateway_pass',    # Will be updated by install script
         'pool_name': 'gateway_pool',
         'pool_size': 5,
         'pool_reset_session': True
     }
     
-    # Local offline storage
-    OFFLINE_STORAGE_PATH = '/home/pi/gateway_data/offline_queue.db'
+    # Local offline storage - CHANGED FROM /home/pi/ TO /home/gateway/
+    OFFLINE_STORAGE_PATH = '/home/gateway/soil_gateway_data/offline_queue.db'  # UPDATED
     MAX_OFFLINE_RECORDS = 10000
     
     # Forwarding settings
@@ -225,12 +225,12 @@ class DatabaseManager:
 # ========================
 app = Flask(__name__)
 
-# Setup logging
+# Setup logging - CHANGED FROM /home/pi/ TO /home/gateway/
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/home/pi/gateway_data/gateway.log'),
+        logging.FileHandler('/home/gateway/soil_gateway_data/gateway.log'),  # UPDATED
         logging.StreamHandler()
     ]
 )
@@ -701,22 +701,22 @@ def setup_database_user():
     print("\nRun these commands in MySQL (as root or admin user):")
     print("\n1. Create gateway user:")
     print(f"""
-CREATE USER 'gateway_user'@'{Config.DB_CONFIG['host']}' 
+CREATE USER 'gateway_user'@'localhost' 
 IDENTIFIED BY 'gateway_pass';
     """)
     print("\n2. Grant minimal permissions:")
     print(f"""
-GRANT INSERT, SELECT ON {Config.DB_CONFIG['database']}.sensor_data 
-TO 'gateway_user'@'{Config.DB_CONFIG['host']}';
+GRANT INSERT, SELECT ON soilmonitornig.sensor_data 
+TO 'gateway_user'@'localhost';
 
-GRANT SELECT ON {Config.DB_CONFIG['database']}.sensors 
-TO 'gateway_user'@'{Config.DB_CONFIG['host']}';
+GRANT SELECT ON soilmonitornig.sensors 
+TO 'gateway_user'@'localhost';
 
-GRANT SELECT ON {Config.DB_CONFIG['database']}.farms 
-TO 'gateway_user'@'{Config.DB_CONFIG['host']}';
+GRANT SELECT ON soilmonitornig.farms 
+TO 'gateway_user'@'localhost';
 
-GRANT SELECT ON {Config.DB_CONFIG['database']}.client 
-TO 'gateway_user'@'{Config.DB_CONFIG['host']}';
+GRANT SELECT ON soilmonitornig.client 
+TO 'gateway_user'@'localhost';
     """)
     print("\n3. Flush privileges:")
     print("FLUSH PRIVILEGES;")
@@ -730,9 +730,9 @@ def main():
     try:
         # Display setup reminder
         print("=" * 60)
-        print("🚀 Enhanced Gateway Pi Starting")
+        print("🚀 Enhanced Soil Monitoring Gateway Starting")
         print("=" * 60)
-        print("\n⚠️  IMPORTANT: Before starting, ensure MySQL user is created:")
+        print("\n⚠️  IMPORTANT: Ensure MySQL user is created and configured")
         setup_database_user()
         
         # Initial health checks
@@ -746,7 +746,8 @@ def main():
         
         # Display startup information
         logger.info("=" * 60)
-        logger.info("🚀 Enhanced IoT Gateway Starting")
+        logger.info("🚀 Soil Monitoring Gateway Starting")
+        logger.info(f"   User: gateway")
         logger.info(f"   Host: {Config.GATEWAY_HOST}:{Config.GATEWAY_PORT}")
         logger.info(f"   MySQL: {Config.DB_CONFIG['host']}/{Config.DB_CONFIG['database']}")
         logger.info(f"   API: {Config.DATABASE_PI_API_URL}")
@@ -779,6 +780,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
 
