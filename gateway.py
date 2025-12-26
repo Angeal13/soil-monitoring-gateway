@@ -1,7 +1,7 @@
 """
 Gateway Pi - Enhanced Gateway with Direct MySQL Access
-Routes sensor data directly to MySQL database
-Uses API for assignment checks and registration
+Routes sensor data to Database Pi (192.168.1.100)
+Uses SQLite for offline storage locally
 """
 from flask import Flask, request, jsonify
 import requests
@@ -26,20 +26,20 @@ class Config:
     # Database Pi (appV7.py) - API URL for non-data operations
     DATABASE_PI_API_URL = "http://192.168.1.95:5000"
     
-    # Direct MySQL Configuration
+    # Direct MySQL Configuration - CONNECTS TO DATABASE PI (192.168.1.100)
     DB_CONFIG = {
-        'host': 'localhost',           # Changed to localhost (installed locally)
+        'host': '192.168.1.100',      # Database Pi IP - DO NOT CHANGE TO localhost
         'port': 3306,
         'database': 'soilmonitornig',
-        'user': 'gateway_user',        # Changed to match installation
-        'password': 'gateway_pass',    # Will be updated by install script
+        'user': 'gateway_user',       # User on Database Pi
+        'password': 'gateway_pass',   # Password on Database Pi
         'pool_name': 'gateway_pool',
         'pool_size': 5,
         'pool_reset_session': True
     }
     
-    # Local offline storage - CHANGED FROM /home/pi/ TO /home/gateway/
-    OFFLINE_STORAGE_PATH = '/home/gateway/soil_gateway_data/offline_queue.db'  # UPDATED
+    # Local offline storage (SQLite on Gateway Pi)
+    OFFLINE_STORAGE_PATH = '/home/gateway/soil_gateway_data/offline_queue.db'
     MAX_OFFLINE_RECORDS = 10000
     
     # Forwarding settings
@@ -62,7 +62,7 @@ class DatabaseManager:
     
     @classmethod
     def initialize_pool(cls):
-        """Initialize MySQL connection pool"""
+        """Initialize MySQL connection pool to Database Pi"""
         try:
             cls._connection_pool = pooling.MySQLConnectionPool(
                 pool_name=Config.DB_CONFIG['pool_name'],
@@ -75,37 +75,37 @@ class DatabaseManager:
                 password=Config.DB_CONFIG['password']
             )
             
-            # Test connection
+            # Test connection to Database Pi
             conn = cls.get_connection()
             if conn.is_connected():
-                logging.info("✅ MySQL connection pool initialized successfully")
+                logging.info(f"✅ MySQL connection to {Config.DB_CONFIG['host']} initialized successfully")
                 conn.close()
                 return True
             else:
-                logging.error("❌ MySQL pool initialization failed")
+                logging.error(f"❌ MySQL pool initialization failed for {Config.DB_CONFIG['host']}")
                 return False
                 
         except Error as e:
-            logging.error(f"❌ MySQL pool initialization error: {e}")
+            logging.error(f"❌ MySQL connection error to {Config.DB_CONFIG['host']}: {e}")
             cls._connection_pool = None
             return False
     
     @classmethod
     def get_connection(cls):
-        """Get connection from pool"""
+        """Get connection from pool to Database Pi"""
         if not cls._connection_pool:
             if not cls.initialize_pool():
-                raise Exception("Database connection pool not available")
+                raise Exception(f"Database connection pool to {Config.DB_CONFIG['host']} not available")
         
         try:
             return cls._connection_pool.get_connection()
         except Error as e:
-            logging.error(f"❌ Failed to get database connection: {e}")
+            logging.error(f"❌ Failed to get database connection to {Config.DB_CONFIG['host']}: {e}")
             raise
     
     @classmethod
     def get_sensor_assignment(cls, machine_id):
-        """Get sensor assignment info from database"""
+        """Get sensor assignment info from Database Pi"""
         query = """
             SELECT 
                 s.machine_id,
@@ -144,7 +144,7 @@ class DatabaseManager:
             }
             
         except Error as e:
-            logging.error(f"Database error getting sensor assignment: {e}")
+            logging.error(f"Database error getting sensor assignment from {Config.DB_CONFIG['host']}: {e}")
             return None
         finally:
             if cursor:
@@ -154,7 +154,7 @@ class DatabaseManager:
     
     @classmethod
     def insert_sensor_data(cls, data):
-        """Insert sensor data directly into MySQL"""
+        """Insert sensor data directly into Database Pi"""
         query = """
             INSERT INTO sensor_data 
             (farm_id, zone_code, machine_id, timestamp, moisture, temperature, 
@@ -191,11 +191,11 @@ class DatabaseManager:
             conn.commit()
             
             inserted_id = cursor.lastrowid
-            logging.info(f"✅ Sensor data inserted into MySQL (ID: {inserted_id})")
+            logging.info(f"✅ Sensor data inserted into MySQL at {Config.DB_CONFIG['host']} (ID: {inserted_id})")
             return inserted_id
             
         except Error as e:
-            logging.error(f"❌ MySQL insert error: {e}")
+            logging.error(f"❌ MySQL insert error at {Config.DB_CONFIG['host']}: {e}")
             if conn:
                 conn.rollback()
             raise
@@ -207,7 +207,7 @@ class DatabaseManager:
     
     @classmethod
     def check_health(cls):
-        """Check MySQL database health"""
+        """Check Database Pi MySQL health"""
         try:
             conn = cls.get_connection()
             cursor = conn.cursor()
@@ -217,7 +217,7 @@ class DatabaseManager:
             conn.close()
             return result[0] == 1
         except Error as e:
-            logging.error(f"MySQL health check failed: {e}")
+            logging.error(f"MySQL health check failed for {Config.DB_CONFIG['host']}: {e}")
             return False
 
 # ========================
@@ -225,12 +225,12 @@ class DatabaseManager:
 # ========================
 app = Flask(__name__)
 
-# Setup logging - CHANGED FROM /home/pi/ TO /home/gateway/
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/home/gateway/soil_gateway_data/gateway.log'),  # UPDATED
+        logging.FileHandler('/home/gateway/soil_gateway_data/gateway.log'),
         logging.StreamHandler()
     ]
 )
@@ -253,7 +253,7 @@ gateway_stats = {
 }
 
 # ========================
-# OFFLINE STORAGE (SQLite)
+# OFFLINE STORAGE (SQLite on Gateway Pi)
 # ========================
 class OfflineStorage:
     def __init__(self, db_path):
@@ -261,7 +261,7 @@ class OfflineStorage:
         self.init_db()
     
     def init_db(self):
-        """Initialize SQLite database for offline storage"""
+        """Initialize SQLite database for offline storage on Gateway Pi"""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         
         conn = sqlite3.connect(self.db_path)
@@ -281,10 +281,10 @@ class OfflineStorage:
         
         conn.commit()
         conn.close()
-        logger.info(f"Offline storage initialized: {self.db_path}")
+        logger.info(f"SQLite offline storage initialized: {self.db_path}")
     
     def save_offline(self, endpoint, data, destination):
-        """Save request to offline queue"""
+        """Save request to offline SQLite queue"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -313,17 +313,17 @@ class OfflineStorage:
                 conn.commit()
                 logger.warning(f"Offline queue trimmed to {Config.MAX_OFFLINE_RECORDS} records")
             
-            logger.info(f"Saved to offline queue: {endpoint} (Dest: {destination}, ID: {record_id})")
+            logger.info(f"Saved to SQLite offline queue: {endpoint} (Dest: {destination}, ID: {record_id})")
             return record_id
             
         except Exception as e:
-            logger.error(f"Failed to save offline: {e}")
+            logger.error(f"Failed to save to SQLite: {e}")
             return None
         finally:
             conn.close()
     
     def get_pending_records(self, destination, limit=50):
-        """Get pending records for retry"""
+        """Get pending records from SQLite for retry"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -341,13 +341,13 @@ class OfflineStorage:
         return records
     
     def update_attempt(self, record_id, success):
-        """Update record after attempt"""
+        """Update SQLite record after attempt"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         if success:
             cursor.execute('DELETE FROM offline_queue WHERE id = ?', (record_id,))
-            logger.info(f"Removed synced record: {record_id}")
+            logger.info(f"Removed synced record from SQLite: {record_id}")
         else:
             cursor.execute('''
                 UPDATE offline_queue 
@@ -360,7 +360,7 @@ class OfflineStorage:
             attempts = cursor.fetchone()[0]
             
             if attempts >= Config.MAX_RETRIES:
-                logger.warning(f"Record {record_id} exceeded max retries, keeping for manual review")
+                logger.warning(f"SQLite record {record_id} exceeded max retries, keeping for manual review")
         
         conn.commit()
         conn.close()
@@ -372,26 +372,26 @@ offline_storage = OfflineStorage(Config.OFFLINE_STORAGE_PATH)
 # HEALTH CHECKS
 # ========================
 def check_mysql_health():
-    """Check if MySQL is reachable"""
+    """Check if Database Pi (192.168.1.100) is reachable"""
     try:
         gateway_stats['mysql_available'] = DatabaseManager.check_health()
         gateway_stats['last_mysql_check'] = datetime.now()
         
         if gateway_stats['mysql_available']:
-            logger.info("✅ MySQL database is reachable")
+            logger.info(f"✅ Database Pi MySQL ({Config.DB_CONFIG['host']}) is reachable")
         else:
-            logger.warning("MySQL database not reachable")
+            logger.warning(f"Database Pi MySQL ({Config.DB_CONFIG['host']}) not reachable")
             
         return gateway_stats['mysql_available']
         
     except Exception as e:
         gateway_stats['mysql_available'] = False
         gateway_stats['last_mysql_check'] = datetime.now()
-        logger.warning(f"MySQL not reachable: {e}")
+        logger.warning(f"Database Pi MySQL ({Config.DB_CONFIG['host']}) not reachable: {e}")
         return False
 
 def check_api_health():
-    """Check if Database Pi API is reachable"""
+    """Check if Database Pi API (192.168.1.95) is reachable"""
     try:
         response = requests.get(
             f"{Config.DATABASE_PI_API_URL}/api/test",
@@ -401,23 +401,23 @@ def check_api_health():
         gateway_stats['last_api_check'] = datetime.now()
         
         if gateway_stats['api_available']:
-            logger.info("✅ Database Pi API is reachable")
+            logger.info(f"✅ Database Pi API ({Config.DATABASE_PI_API_URL}) is reachable")
         else:
-            logger.warning(f"Database Pi API returned status {response.status_code}")
+            logger.warning(f"Database Pi API ({Config.DATABASE_PI_API_URL}) returned status {response.status_code}")
             
         return gateway_stats['api_available']
         
     except Exception as e:
         gateway_stats['api_available'] = False
         gateway_stats['last_api_check'] = datetime.now()
-        logger.warning(f"Database Pi API not reachable: {e}")
+        logger.warning(f"Database Pi API ({Config.DATABASE_PI_API_URL}) not reachable: {e}")
         return False
 
 # ========================
 # REQUEST PROCESSING
 # ========================
 def call_api(endpoint, data, method='POST'):
-    """Call Database Pi API"""
+    """Call Database Pi API (192.168.1.95)"""
     url = f"{Config.DATABASE_PI_API_URL}{endpoint}"
     
     for attempt in range(Config.MAX_RETRIES):
@@ -427,17 +427,17 @@ def call_api(endpoint, data, method='POST'):
             else:  # GET
                 response = requests.get(url, timeout=Config.API_TIMEOUT)
             
-            logger.debug(f"API {endpoint}: Status {response.status_code}")
+            logger.debug(f"API {endpoint} to {Config.DATABASE_PI_API_URL}: Status {response.status_code}")
             
             if response.status_code in [200, 201]:
                 gateway_stats['api_calls'] += 1
                 return True, response.json()
             else:
-                logger.warning(f"API {endpoint} failed: Status {response.status_code}")
+                logger.warning(f"API {endpoint} to {Config.DATABASE_PI_API_URL} failed: Status {response.status_code}")
                 time.sleep(Config.RETRY_DELAY)
                 
         except Exception as e:
-            logger.warning(f"API attempt {attempt + 1} failed: {e}")
+            logger.warning(f"API attempt {attempt + 1} to {Config.DATABASE_PI_API_URL} failed: {e}")
             if attempt < Config.MAX_RETRIES - 1:
                 time.sleep(Config.RETRY_DELAY)
     
@@ -445,36 +445,36 @@ def call_api(endpoint, data, method='POST'):
     return False, None
 
 def process_sensor_data(data):
-    """Process sensor data - try MySQL first, fallback to offline storage"""
+    """Process sensor data - try Database Pi MySQL first, fallback to SQLite"""
     try:
-        # Try direct MySQL insert
+        # Try direct MySQL insert to Database Pi
         inserted_id = DatabaseManager.insert_sensor_data(data)
         gateway_stats['mysql_inserts'] += 1
-        return True, {'mysql_id': inserted_id}
+        return True, {'mysql_id': inserted_id, 'host': Config.DB_CONFIG['host']}
         
     except Exception as e:
-        logger.warning(f"MySQL insert failed, saving offline: {e}")
+        logger.warning(f"MySQL insert to {Config.DB_CONFIG['host']} failed, saving to SQLite: {e}")
         gateway_stats['mysql_errors'] += 1
         
-        # Save to offline storage
+        # Save to SQLite offline storage on Gateway Pi
         record_id = offline_storage.save_offline('/api/sensor-data', data, 'mysql')
         if record_id:
             gateway_stats['stored_offline'] += 1
-            return False, {'offline_id': record_id, 'message': 'Data saved offline'}
+            return False, {'offline_id': record_id, 'message': f'Data saved to SQLite, will sync to {Config.DB_CONFIG["host"]}'}
         
-        return False, {'error': 'Failed to save data'}
+        return False, {'error': 'Failed to save data to SQLite'}
 
 def process_offline_queue():
-    """Process offline queue in background"""
+    """Process SQLite offline queue in background - sync to Database Pi"""
     while True:
         try:
             time.sleep(Config.BATCH_INTERVAL)
             
-            # Process MySQL-bound records
+            # Process MySQL-bound records (sync to Database Pi)
             if check_mysql_health():
                 mysql_records = offline_storage.get_pending_records('mysql', Config.BATCH_SIZE)
                 if mysql_records:
-                    logger.info(f"Processing {len(mysql_records)} offline MySQL records")
+                    logger.info(f"Processing {len(mysql_records)} SQLite records to sync with {Config.DB_CONFIG['host']}")
                     
                     for record in mysql_records:
                         record_id = record['id']
@@ -484,16 +484,16 @@ def process_offline_queue():
                             inserted_id = DatabaseManager.insert_sensor_data(data)
                             offline_storage.update_attempt(record_id, True)
                             gateway_stats['offline_synced'] += 1
-                            logger.info(f"Synced offline record {record_id} to MySQL")
+                            logger.info(f"Synced SQLite record {record_id} to MySQL at {Config.DB_CONFIG['host']}")
                         except Exception as e:
                             offline_storage.update_attempt(record_id, False)
-                            logger.error(f"Failed to sync offline record {record_id}: {e}")
+                            logger.error(f"Failed to sync SQLite record {record_id} to {Config.DB_CONFIG['host']}: {e}")
             
-            # Process API-bound records
+            # Process API-bound records (sync to Database Pi API)
             if check_api_health():
                 api_records = offline_storage.get_pending_records('api', Config.BATCH_SIZE)
                 if api_records:
-                    logger.info(f"Processing {len(api_records)} offline API records")
+                    logger.info(f"Processing {len(api_records)} SQLite records to sync with {Config.DATABASE_PI_API_URL}")
                     
                     for record in api_records:
                         record_id = record['id']
@@ -505,12 +505,12 @@ def process_offline_queue():
                         
                         if success:
                             gateway_stats['offline_synced'] += 1
-                            logger.info(f"Synced offline record {record_id} to API")
+                            logger.info(f"Synced SQLite record {record_id} to API at {Config.DATABASE_PI_API_URL}")
                         else:
-                            logger.error(f"Failed to sync offline API record {record_id}")
+                            logger.error(f"Failed to sync SQLite API record {record_id} to {Config.DATABASE_PI_API_URL}")
             
         except Exception as e:
-            logger.error(f"Error processing offline queue: {e}")
+            logger.error(f"Error processing SQLite offline queue: {e}")
             time.sleep(60)
 
 # ========================
@@ -529,17 +529,16 @@ def test_gateway():
         "gateway": "online",
         "timestamp": datetime.now().isoformat(),
         "mysql": mysql_status,
+        "mysql_host": Config.DB_CONFIG['host'],
         "api": api_status,
-        "mysql_config": {
-            "host": Config.DB_CONFIG['host'],
-            "database": Config.DB_CONFIG['database']
-        },
-        "api_url": Config.DATABASE_PI_API_URL
+        "api_url": Config.DATABASE_PI_API_URL,
+        "offline_storage": "sqlite",
+        "offline_path": Config.OFFLINE_STORAGE_PATH
     })
 
 @app.route('/api/sensor-data', methods=['POST'])
 def handle_sensor_data():
-    """Receive sensor data and store in MySQL"""
+    """Receive sensor data and store in Database Pi MySQL (or SQLite offline)"""
     gateway_stats['requests_received'] += 1
     
     try:
@@ -553,25 +552,28 @@ def handle_sensor_data():
         
         logger.info(f"Received data from sensor {machine_id}")
         
-        # Process data (try MySQL first)
+        # Process data (try Database Pi MySQL first)
         success, result = process_sensor_data(data)
         
         if success:
-            logger.info(f"Data stored in MySQL for sensor {machine_id}")
+            logger.info(f"Data stored in MySQL at {Config.DB_CONFIG['host']} for sensor {machine_id}")
             return jsonify({
                 "status": "stored",
-                "message": "Data stored directly in MySQL database",
+                "message": f"Data stored in MySQL database at {Config.DB_CONFIG['host']}",
                 "mysql_id": result.get('mysql_id'),
+                "mysql_host": Config.DB_CONFIG['host'],
                 "timestamp": datetime.now().isoformat()
             })
         else:
-            # Data was saved offline
+            # Data was saved to SQLite offline
             if 'offline_id' in result:
-                logger.info(f"Data saved offline for sensor {machine_id} (Record: {result['offline_id']})")
+                logger.info(f"Data saved to SQLite for sensor {machine_id} (Record: {result['offline_id']})")
                 return jsonify({
                     "status": "stored_offline",
-                    "message": "MySQL unavailable, data stored locally",
+                    "message": f"MySQL at {Config.DB_CONFIG['host']} unavailable, data stored in SQLite",
                     "offline_id": result['offline_id'],
+                    "offline_storage": "sqlite",
+                    "mysql_host": Config.DB_CONFIG['host'],
                     "timestamp": datetime.now().isoformat()
                 }), 202
             else:
@@ -583,7 +585,7 @@ def handle_sensor_data():
 
 @app.route('/api/sensors/register', methods=['POST'])
 def handle_sensor_registration():
-    """Handle sensor registration via API"""
+    """Handle sensor registration via Database Pi API"""
     gateway_stats['requests_received'] += 1
     
     try:
@@ -597,21 +599,21 @@ def handle_sensor_registration():
         
         logger.info(f"Registration request for sensor {machine_id}")
         
-        # Try to call API
+        # Try to call Database Pi API
         success, response = call_api('/api/sensors/register', data)
         
         if success:
-            logger.info(f"Registration completed for sensor {machine_id}")
+            logger.info(f"Registration completed for sensor {machine_id} via {Config.DATABASE_PI_API_URL}")
             return jsonify(response), 200
         else:
-            # Save to offline storage
+            # Save to SQLite offline storage
             record_id = offline_storage.save_offline('/api/sensors/register', data, 'api')
             if record_id:
                 gateway_stats['stored_offline'] += 1
-                logger.info(f"Registration saved offline for sensor {machine_id}")
+                logger.info(f"Registration saved to SQLite for sensor {machine_id}")
                 return jsonify({
                     "status": "queued",
-                    "message": "Registration queued, will retry",
+                    "message": f"API {Config.DATABASE_PI_API_URL} unavailable, registration queued in SQLite",
                     "machine_id": machine_id,
                     "timestamp": datetime.now().isoformat()
                 }), 202
@@ -624,18 +626,18 @@ def handle_sensor_registration():
 
 @app.route('/api/sensors/<machine_id>/assignment', methods=['GET'])
 def handle_assignment_check(machine_id):
-    """Check sensor assignment status via API"""
+    """Check sensor assignment status via Database Pi API"""
     gateway_stats['requests_received'] += 1
     
     logger.info(f"Assignment check for sensor {machine_id}")
     
-    # Try to call API
+    # Try to call Database Pi API
     success, response = call_api(f'/api/sensors/{machine_id}/assignment', None, method='GET')
     
     if success:
         return jsonify(response), 200
     else:
-        # For GET requests, try direct database check as fallback
+        # For GET requests, try direct Database Pi MySQL check as fallback
         try:
             assignment_info = DatabaseManager.get_sensor_assignment(machine_id)
             if assignment_info:
@@ -643,12 +645,13 @@ def handle_assignment_check(machine_id):
             else:
                 return jsonify({
                     "error": "Sensor not found",
-                    "machine_id": machine_id
+                    "machine_id": machine_id,
+                    "mysql_host": Config.DB_CONFIG['host']
                 }), 404
         except Exception as e:
-            logger.warning(f"Could not check assignment for {machine_id}: {e}")
+            logger.warning(f"Could not check assignment for {machine_id} from {Config.DB_CONFIG['host']}: {e}")
             return jsonify({
-                "error": "API and database unavailable",
+                "error": f"API {Config.DATABASE_PI_API_URL} and MySQL {Config.DB_CONFIG['host']} unavailable",
                 "machine_id": machine_id,
                 "suggestion": "Retry later"
             }), 503
@@ -673,7 +676,9 @@ def health_check():
             "api_calls": gateway_stats['api_calls'],
             "api_errors": gateway_stats['api_errors'],
             "stored_offline": gateway_stats['stored_offline'],
-            "offline_synced": gateway_stats['offline_synced']
+            "offline_synced": gateway_stats['offline_synced'],
+            "offline_storage": "sqlite",
+            "offline_path": Config.OFFLINE_STORAGE_PATH
         },
         "mysql": {
             "host": Config.DB_CONFIG['host'],
@@ -685,8 +690,34 @@ def health_check():
             "url": Config.DATABASE_PI_API_URL,
             "available": api_healthy,
             "last_check": gateway_stats['last_api_check'].isoformat() if gateway_stats['last_api_check'] else None
+        },
+        "offline_queue": {
+            "size": 0,
+            "pending_mysql": 0,
+            "pending_api": 0
         }
     }
+    
+    # Get SQLite offline queue stats
+    try:
+        conn = sqlite3.connect(Config.OFFLINE_STORAGE_PATH)
+        cursor = conn.cursor()
+        
+        # Total records
+        cursor.execute('SELECT COUNT(*) FROM offline_queue')
+        health_data['offline_queue']['size'] = cursor.fetchone()[0]
+        
+        # MySQL-bound pending
+        cursor.execute('SELECT COUNT(*) FROM offline_queue WHERE destination = "mysql" AND attempts < ?', (Config.MAX_RETRIES,))
+        health_data['offline_queue']['pending_mysql'] = cursor.fetchone()[0]
+        
+        # API-bound pending
+        cursor.execute('SELECT COUNT(*) FROM offline_queue WHERE destination = "api" AND attempts < ?', (Config.MAX_RETRIES,))
+        health_data['offline_queue']['pending_api'] = cursor.fetchone()[0]
+        
+        conn.close()
+    except:
+        pass
     
     return jsonify(health_data)
 
@@ -694,33 +725,35 @@ def health_check():
 # DATABASE SETUP UTILITY
 # ========================
 def setup_database_user():
-    """Script to create the gateway user in MySQL"""
+    """Script to create the gateway user in Database Pi MySQL"""
     print("=" * 60)
-    print("MySQL Gateway User Setup")
+    print("MySQL Gateway User Setup for Database Pi (192.168.1.100)")
     print("=" * 60)
-    print("\nRun these commands in MySQL (as root or admin user):")
+    print("\nRun these commands on Database Pi (192.168.1.100) in MySQL:")
     print("\n1. Create gateway user:")
     print(f"""
-CREATE USER 'gateway_user'@'localhost' 
+CREATE USER 'gateway_user'@'%' 
 IDENTIFIED BY 'gateway_pass';
     """)
     print("\n2. Grant minimal permissions:")
     print(f"""
 GRANT INSERT, SELECT ON soilmonitornig.sensor_data 
-TO 'gateway_user'@'localhost';
+TO 'gateway_user'@'%';
 
 GRANT SELECT ON soilmonitornig.sensors 
-TO 'gateway_user'@'localhost';
+TO 'gateway_user'@'%';
 
 GRANT SELECT ON soilmonitornig.farms 
-TO 'gateway_user'@'localhost';
+TO 'gateway_user'@'%';
 
 GRANT SELECT ON soilmonitornig.client 
-TO 'gateway_user'@'localhost';
+TO 'gateway_user'@'%';
     """)
     print("\n3. Flush privileges:")
     print("FLUSH PRIVILEGES;")
     print("\n" + "=" * 60)
+    print("IMPORTANT: Update gateway.py with these credentials!")
+    print("=" * 60)
 
 # ========================
 # MAIN APPLICATION
@@ -732,8 +765,15 @@ def main():
         print("=" * 60)
         print("🚀 Enhanced Soil Monitoring Gateway Starting")
         print("=" * 60)
-        print("\n⚠️  IMPORTANT: Ensure MySQL user is created and configured")
-        setup_database_user()
+        print(f"\n📊 Database Configuration:")
+        print(f"   MySQL Host: {Config.DB_CONFIG['host']}")
+        print(f"   Database: {Config.DB_CONFIG['database']}")
+        print(f"   User: {Config.DB_CONFIG['user']}")
+        print(f"\n💾 Local Storage:")
+        print(f"   SQLite Offline: {Config.OFFLINE_STORAGE_PATH}")
+        print(f"\n🌐 API Endpoint:")
+        print(f"   Database Pi API: {Config.DATABASE_PI_API_URL}")
+        print("=" * 60)
         
         # Initial health checks
         check_mysql_health()
@@ -742,7 +782,7 @@ def main():
         # Start offline queue processor
         queue_processor = Thread(target=process_offline_queue, daemon=True)
         queue_processor.start()
-        logger.info("Offline queue processor started")
+        logger.info("SQLite offline queue processor started")
         
         # Display startup information
         logger.info("=" * 60)
@@ -751,19 +791,18 @@ def main():
         logger.info(f"   Host: {Config.GATEWAY_HOST}:{Config.GATEWAY_PORT}")
         logger.info(f"   MySQL: {Config.DB_CONFIG['host']}/{Config.DB_CONFIG['database']}")
         logger.info(f"   API: {Config.DATABASE_PI_API_URL}")
-        logger.info(f"   Offline Storage: {Config.OFFLINE_STORAGE_PATH}")
+        logger.info(f"   SQLite Offline: {Config.OFFLINE_STORAGE_PATH}")
         logger.info("=" * 60)
         logger.info("📡 Endpoints available:")
-        logger.info("   POST /api/sensor-data        - Store sensor data (direct to MySQL)")
+        logger.info("   POST /api/sensor-data        - Store sensor data to Database Pi")
         logger.info("   POST /api/sensors/register   - Register sensor (via API)")
-        logger.info("   GET  /api/sensors/{id}/assignment - Check assignment (via API)")
+        logger.info("   GET  /api/sensors/{id}/assignment - Check assignment")
         logger.info("   GET  /api/health             - Health check")
         logger.info("   GET  /api/test               - Connectivity test")
         logger.info("=" * 60)
         logger.info("💾 Data Flow:")
-        logger.info("   Sensor Data → Direct MySQL Insert")
-        logger.info("   Registration/Assignment → API Call")
-        logger.info("   Offline Fallback → SQLite → Retry")
+        logger.info(f"   Sensor Data → Database Pi MySQL ({Config.DB_CONFIG['host']})")
+        logger.info("   If unavailable → SQLite offline → Sync when back online")
         logger.info("=" * 60)
         
         # Start Flask application
@@ -780,4 +819,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
