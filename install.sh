@@ -1,11 +1,12 @@
 #!/bin/bash
 # Soil Monitoring Gateway - Complete Installation Script
 # For Raspberry Pi with gateway username
+# MySQL connection to 192.168.1.100 (Database Pi)
 # GitHub: https://github.com/yourusername/soil-monitoring-gateway
 
 echo "================================================"
 echo "Installing Soil Monitoring Gateway"
-echo "User: gateway | Purpose: IoT Data Gateway"
+echo "User: gateway | MySQL Host: 192.168.1.100"
 echo "================================================"
 
 # ========================
@@ -36,7 +37,7 @@ print_blue() {
 # ========================
 # CHECK USER AND PERMISSIONS
 # ========================
-print_blue "[1/15] Checking user and permissions..."
+print_blue "[1/14] Checking user and permissions..."
 
 if [[ "$USER" != "gateway" ]]; then
     print_yellow "Warning: Script is running as user: $USER"
@@ -75,77 +76,39 @@ fi
 # ========================
 # SYSTEM UPDATE
 # ========================
-print_blue "[2/15] Updating system packages..."
+print_blue "[2/14] Updating system packages..."
 sudo apt update
 sudo apt upgrade -y -qq
 
 # ========================
 # INSTALL SYSTEM DEPENDENCIES
 # ========================
-print_blue "[3/15] Installing system dependencies..."
+print_blue "[3/14] Installing system dependencies..."
 sudo apt install python3 python3-pip python3-venv python3-dev -y -qq
 sudo apt install curl wget git -y -qq
 sudo apt install sqlite3 -y -qq  # For offline storage
 
 # ========================
-# INSTALL DATABASE SYSTEMS
+# INSTALL DATABASE CLIENT LIBRARIES
 # ========================
-print_blue "[4/15] Installing database systems..."
+print_blue "[4/14] Installing database libraries..."
 
-# Check and install MariaDB/MySQL Server
-if ! dpkg -l | grep -q mariadb-server && ! dpkg -l | grep -q mysql-server; then
-    print_yellow "Database server not found. Installing MariaDB..."
-    sudo apt install mariadb-server mariadb-client -y -qq
-    sudo systemctl enable mariadb
-    sudo systemctl start mariadb
-    print_green "MariaDB server installed and started"
-else
-    print_green "Database server already installed"
-    
-    # Ensure service is running
-    sudo systemctl start mariadb 2>/dev/null || sudo systemctl start mysql 2>/dev/null
-fi
-
-# Install MySQL development libraries for Python connector
-sudo apt install libmariadb-dev libmariadb3 -y -qq
-print_green "Database libraries installed"
-
-# ========================
-# SECURE MYSQL INSTALLATION
-# ========================
-print_blue "[5/15] Securing MySQL database..."
-
-# Check if MySQL is already secured
-if sudo mysql -e "SELECT 1" 2>/dev/null; then
-    print_yellow "MySQL root access without password detected."
-    print_yellow "Running mysql_secure_installation..."
-    
-    # Automated mysql_secure_installation
-    sudo mysql <<EOF
-ALTER USER 'root'@'localhost' IDENTIFIED BY 'RootPassword123!';
-DELETE FROM mysql.user WHERE User='';
-DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
-DROP DATABASE IF EXISTS test;
-DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
-FLUSH PRIVILEGES;
-EOF
-    
-    print_green "MySQL secured with root password: RootPassword123!"
-else
-    print_green "MySQL already secured"
-fi
+# Only install MySQL client libraries (NOT server)
+sudo apt install libmariadb-dev libmariadb3 mariadb-client -y -qq
+print_green "MySQL client libraries installed"
+print_yellow "NOTE: MySQL server is at 192.168.1.100 (Database Pi)"
 
 # ========================
 # CREATE APPLICATION STRUCTURE
 # ========================
-print_blue "[6/15] Creating application structure..."
+print_blue "[5/14] Creating application structure..."
 
 # Main application directory
 APP_DIR="/home/gateway/soil-gateway"
 mkdir -p $APP_DIR
 chmod 755 $APP_DIR
 
-# Gateway data directory
+# Gateway data directory (for SQLite offline storage)
 GATEWAY_DATA_DIR="/home/gateway/soil_gateway_data"
 mkdir -p $GATEWAY_DATA_DIR
 chmod 755 $GATEWAY_DATA_DIR
@@ -157,13 +120,13 @@ chmod 755 $LOG_DIR
 
 print_green "Directories created:"
 print_green "  📁 $APP_DIR (Application)"
-print_green "  💾 $GATEWAY_DATA_DIR (Data storage)"
+print_green "  💾 $GATEWAY_DATA_DIR (SQLite offline storage)"
 print_green "  📝 $LOG_DIR (Logs)"
 
 # ========================
 # COPY GATEWAY FILES
 # ========================
-print_blue "[7/15] Copying gateway files..."
+print_blue "[6/14] Copying gateway files..."
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
@@ -196,7 +159,7 @@ fi
 # ========================
 # CREATE PYTHON VIRTUAL ENVIRONMENT
 # ========================
-print_blue "[8/15] Creating Python virtual environment..."
+print_blue "[7/14] Creating Python virtual environment..."
 
 VENV_PATH="/home/gateway/soil-gateway-venv"
 if [ -d "$VENV_PATH" ]; then
@@ -218,7 +181,7 @@ fi
 # ========================
 # INSTALL PYTHON PACKAGES
 # ========================
-print_blue "[9/15] Installing Python packages..."
+print_blue "[8/14] Installing Python packages..."
 
 source $VENV_PATH/bin/activate
 pip install --upgrade pip
@@ -242,116 +205,72 @@ deactivate
 print_green "Python packages installed"
 
 # ========================
-# SETUP MYSQL DATABASE AND USER
+# SETUP DATABASE CREDENTIALS
 # ========================
-print_blue "[10/15] Setting up MySQL database..."
+print_blue "[9/14] Setting up database credentials..."
 
 DB_NAME="soilmonitornig"
 DB_USER="gateway_user"
-DB_PASS=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-12)
+DB_PASS="gateway_pass"  # Default - user should change this
 
-print_yellow "Setting up database: $DB_NAME"
-print_yellow "Creating user: $DB_USER"
+print_yellow "Database Configuration:"
+print_yellow "  Host: 192.168.1.100 (Database Pi)"
+print_yellow "  Database: $DB_NAME"
+print_yellow "  Username: $DB_USER"
+print_yellow "  Password: $DB_PASS"
+echo ""
+print_yellow "⚠️  IMPORTANT: Ensure these credentials are correct on Database Pi!"
+print_yellow "   Run on Database Pi (192.168.1.100):"
+print_yellow "   CREATE USER '$DB_USER'@'%' IDENTIFIED BY '$DB_PASS';"
+print_yellow "   GRANT INSERT,SELECT ON $DB_NAME.* TO '$DB_USER'@'%';"
 
-# Create SQL setup file
-MYSQL_SETUP_FILE="$APP_DIR/setup_database.sql"
-cat > $MYSQL_SETUP_FILE << EOF
--- Soil Monitoring Gateway Database Setup
--- Generated on $(date)
-
--- Create database
-CREATE DATABASE IF NOT EXISTS $DB_NAME 
-CHARACTER SET utf8mb4 
-COLLATE utf8mb4_unicode_ci;
-
-USE $DB_NAME;
-
--- Note: Main tables (sensors, sensor_data, farms, client) should be created by appV7.py
--- If you need to create them here, add CREATE TABLE statements
-
--- Create gateway user
-DROP USER IF EXISTS '$DB_USER'@'localhost';
-CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
-
--- Grant permissions (minimal required)
-GRANT INSERT, SELECT ON $DB_NAME.sensor_data TO '$DB_USER'@'localhost';
-GRANT SELECT ON $DB_NAME.sensors TO '$DB_USER'@'localhost';
-GRANT SELECT ON $DB_NAME.farms TO '$DB_USER'@'localhost';
-GRANT SELECT ON $DB_NAME.client TO '$DB_USER'@'localhost';
-
--- For remote MySQL server, use this instead:
--- CREATE USER '$DB_USER'@'%' IDENTIFIED BY '$DB_PASS';
--- GRANT ... TO '$DB_USER'@'%';
-
-FLUSH PRIVILEGES;
-
--- Show summary
-SELECT '=== DATABASE SETUP COMPLETE ===' AS '';
-SELECT CONCAT('Database: ', '$DB_NAME') AS '';
-SELECT CONCAT('Username: ', '$DB_USER@localhost') AS '';
-SELECT CONCAT('Password: ', '$DB_PASS') AS '';
-SELECT 'Update gateway.py with these credentials!' AS '';
+# Create credentials file
+CRED_FILE="$APP_DIR/mysql_credentials.txt"
+cat > $CRED_FILE << EOF
+MySQL Credentials for Database Pi (192.168.1.100)
+=================================================
+Host: 192.168.1.100
+Database: $DB_NAME
+Username: $DB_USER
+Password: $DB_PASS
+=================================================
+IMPORTANT:
+1. These must match the user/password on Database Pi
+2. Update gateway.py if credentials are different
+3. Test connection: mysql -h 192.168.1.100 -u $DB_USER -p$DB_PASS $DB_NAME
 EOF
 
-print_green "MySQL setup script created: $MYSQL_SETUP_FILE"
-
-# Execute MySQL setup
-print_yellow "Setting up MySQL database..."
-if sudo mysql -u root -pRootPassword123! < $MYSQL_SETUP_FILE 2>/dev/null || \
-   sudo mysql -u root < $MYSQL_SETUP_FILE 2>/dev/null; then
-    print_green "✅ MySQL database setup complete!"
-    
-    # Save credentials to file
-    CRED_FILE="$APP_DIR/mysql_credentials.txt"
-    echo "MySQL Credentials:" > $CRED_FILE
-    echo "=================" >> $CRED_FILE
-    echo "Host: localhost" >> $CRED_FILE
-    echo "Database: $DB_NAME" >> $CRED_FILE
-    echo "Username: $DB_USER" >> $CRED_FILE
-    echo "Password: $DB_PASS" >> $CRED_FILE
-    echo "=================" >> $CRED_FILE
-    echo "Generated: $(date)" >> $CRED_FILE
-    
-    chmod 600 $CRED_FILE
-    print_green "Credentials saved to: $CRED_FILE"
-    
-    # Show credentials
-    echo ""
-    cat $CRED_FILE
-    echo ""
-    
-else
-    print_red "Failed to setup MySQL database automatically."
-    print_yellow "Manual setup required:"
-    print_yellow "  sudo mysql -u root -p < $MYSQL_SETUP_FILE"
-    DB_PASS="gateway_pass"  # Fallback to default
-fi
+chmod 600 $CRED_FILE
+print_green "Credentials file created: $CRED_FILE"
 
 # ========================
 # UPDATE GATEWAY CONFIGURATION
 # ========================
-print_blue "[11/15] Updating gateway configuration..."
+print_blue "[10/14] Updating gateway configuration..."
 
 GATEWAY_FILE="$APP_DIR/gateway.py"
 if [ -f "$GATEWAY_FILE" ]; then
     # Backup original
     cp "$GATEWAY_FILE" "$GATEWAY_FILE.backup"
     
-    # Update offline storage path
+    # Update ONLY offline storage path (preserve 192.168.1.100 host)
     sed -i "s|/home/[^/]*/gateway_data|$GATEWAY_DATA_DIR|g" "$GATEWAY_FILE"
-    
-    # Update MySQL configuration for local database
-    sed -i "s/'host': '[^']*'/'host': 'localhost'/g" "$GATEWAY_FILE"
-    sed -i "s/'user': '[^']*'/'user': '$DB_USER'/g" "$GATEWAY_FILE"
-    sed -i "s/'password': '[^']*'/'password': '$DB_PASS'/g" "$GATEWAY_FILE"
-    sed -i "s/'database': '[^']*'/'database': '$DB_NAME'/g" "$GATEWAY_FILE"
     
     print_green "Gateway configuration updated:"
     echo ""
+    print_yellow "Current MySQL configuration:"
     grep -A1 "'host':" "$GATEWAY_FILE"
     grep -A1 "'user':" "$GATEWAY_FILE"
     grep -A1 "'database':" "$GATEWAY_FILE"
     echo ""
+    
+    # Verify host is 192.168.1.100
+    if grep -q "'host': '192.168.1.100'" "$GATEWAY_FILE"; then
+        print_green "✅ MySQL host correctly set to 192.168.1.100"
+    else
+        print_red "❌ MySQL host is NOT 192.168.1.100!"
+        print_yellow "Please edit gateway.py and set host to '192.168.1.100'"
+    fi
     
 else
     print_red "Error: gateway.py not found!"
@@ -361,15 +280,15 @@ fi
 # ========================
 # CREATE CONFIGURATION FILE
 # ========================
-print_blue "[12/15] Creating configuration file..."
+print_blue "[11/14] Creating configuration file..."
 
 CONFIG_FILE="$APP_DIR/gateway_config.env"
 cat > $CONFIG_FILE << EOF
 # Soil Monitoring Gateway Configuration
 # Auto-generated on $(date)
 
-# Database Configuration
-MYSQL_HOST=localhost
+# Database Configuration (Database Pi at 192.168.1.100)
+MYSQL_HOST=192.168.1.100
 MYSQL_DATABASE=$DB_NAME
 MYSQL_USER=$DB_USER
 MYSQL_PASSWORD=$DB_PASS
@@ -385,7 +304,7 @@ GATEWAY_HOST=0.0.0.0
 GATEWAY_PORT=5000
 API_URL=http://192.168.1.95:5000
 
-# Offline Storage
+# Offline Storage (SQLite on Gateway Pi)
 OFFLINE_DB=$GATEWAY_DATA_DIR/offline_queue.db
 MAX_OFFLINE_RECORDS=10000
 EOF
@@ -396,13 +315,13 @@ print_green "Configuration file created: $CONFIG_FILE"
 # ========================
 # SETUP AUTO-START SERVICE
 # ========================
-print_blue "[13/15] Setting up auto-start service..."
+print_blue "[12/14] Setting up auto-start service..."
 
 SERVICE_FILE="/etc/systemd/system/soil-gateway.service"
 sudo tee $SERVICE_FILE > /dev/null << EOF
 [Unit]
 Description=Soil Monitoring Gateway Service
-After=network.target mariadb.service mysql.service
+After=network.target
 Wants=network.target
 StartLimitIntervalSec=500
 StartLimitBurst=5
@@ -444,7 +363,7 @@ print_green "Systemd service created and enabled"
 # ========================
 # SETUP LOG ROTATION
 # ========================
-print_blue "[14/15] Setting up log rotation..."
+print_blue "[13/14] Setting up log rotation..."
 
 LOGROTATE_FILE="/etc/logrotate.d/soil-gateway"
 sudo tee $LOGROTATE_FILE > /dev/null << EOF
@@ -468,7 +387,7 @@ print_green "Log rotation configured (14 days retention)"
 # ========================
 # CREATE UTILITY SCRIPTS
 # ========================
-print_blue "[15/15] Creating utility scripts..."
+print_blue "[14/14] Creating utility scripts..."
 
 # Main management script
 MANAGE_SCRIPT="$APP_DIR/manage-gateway.sh"
@@ -493,6 +412,7 @@ show_help() {
     echo "  config      - Edit gateway configuration"
     echo "  test        - Test gateway connectivity"
     echo "  health      - Check gateway health"
+    echo "  db-test     - Test MySQL connection to 192.168.1.100"
     echo "  backup      - Backup gateway data"
     echo "  update      - Update from repository"
     echo "  help        - Show this help"
@@ -538,6 +458,22 @@ case "$1" in
     health)
         echo "Checking gateway health..."
         curl -s http://localhost:5000/api/health | python3 -m json.tool 2>/dev/null || echo "Health check failed"
+        ;;
+    db-test)
+        echo "Testing MySQL connection to 192.168.1.100..."
+        # Extract credentials from gateway.py
+        DB_HOST=$(grep -A1 "'host':" /home/gateway/soil-gateway/gateway.py | tail -1 | grep -o "'.*'" | tr -d "'")
+        DB_USER=$(grep -A1 "'user':" /home/gateway/soil-gateway/gateway.py | tail -1 | grep -o "'.*'" | tr -d "'")
+        DB_PASS=$(grep -A1 "'password':" /home/gateway/soil-gateway/gateway.py | tail -1 | grep -o "'.*'" | tr -d "'")
+        DB_NAME=$(grep -A1 "'database':" /home/gateway/soil-gateway/gateway.py | tail -1 | grep -o "'.*'" | tr -d "'")
+        
+        echo "Testing connection to: $DB_HOST"
+        if mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" -e "USE $DB_NAME; SELECT '✅ Connection successful' AS status;" 2>/dev/null; then
+            echo "✅ MySQL connection successful to $DB_HOST"
+        else
+            echo "❌ MySQL connection failed to $DB_HOST"
+            echo "Check credentials in: /home/gateway/soil-gateway/gateway.py"
+        fi
         ;;
     backup)
         echo "Backing up gateway data..."
@@ -590,6 +526,7 @@ if curl -s --max-time 5 http://localhost:5000/api/test >/dev/null; then
     RESPONSE=$(curl -s http://localhost:5000/api/test)
     echo "   Gateway: $(echo $RESPONSE | grep -o '"gateway":"[^"]*"' | cut -d'"' -f4)"
     echo "   MySQL: $(echo $RESPONSE | grep -o '"mysql":"[^"]*"' | cut -d'"' -f4)"
+    echo "   MySQL Host: $(echo $RESPONSE | grep -o '"host":"[^"]*"' | cut -d'"' -f4)"
 else
     echo "❌ API not responding"
 fi
@@ -598,42 +535,6 @@ echo ""
 echo "=== Test Complete ==="
 EOF
 chmod +x $TEST_SCRIPT
-
-# Setup database test
-DB_TEST_SCRIPT="$APP_DIR/test-database.sh"
-cat > $DB_TEST_SCRIPT << EOF
-#!/bin/bash
-echo "=== Database Connection Test ==="
-echo ""
-
-echo "1. SQLite (Offline Storage):"
-if [ -f "$GATEWAY_DATA_DIR/offline_queue.db" ]; then
-    echo "✅ Offline database exists"
-    sqlite3 "$GATEWAY_DATA_DIR/offline_queue.db" ".tables" 2>/dev/null && echo "✅ Tables accessible" || echo "❌ Cannot access tables"
-else
-    echo "⚠️  Offline database not created yet"
-fi
-
-echo ""
-echo "2. MySQL Connection:"
-if mysql -u $DB_USER -p$DB_PASS -h localhost -e "USE $DB_NAME; SELECT '✅ MySQL connection successful' AS status;" 2>/dev/null; then
-    echo "✅ MySQL connection successful"
-    echo "   Database: $DB_NAME"
-    echo "   User: $DB_USER"
-    
-    # Check tables
-    TABLES=\$(mysql -u $DB_USER -p$DB_PASS -h localhost -D $DB_NAME -e "SHOW TABLES;" 2>/dev/null)
-    if [ ! -z "\$TABLES" ]; then
-        echo "✅ Tables found in database"
-    else
-        echo "⚠️  No tables found (they may be created by appV7.py)"
-    fi
-else
-    echo "❌ MySQL connection failed"
-    echo "   Check credentials in: $APP_DIR/mysql_credentials.txt"
-fi
-EOF
-chmod +x $DB_TEST_SCRIPT
 
 print_green "Utility scripts created"
 
@@ -654,18 +555,19 @@ echo ""
 echo "📋 INSTALLATION SUMMARY:"
 echo "   👤 User:           gateway"
 echo "   📍 Application:    $APP_DIR/"
-echo "   💾 Data Storage:   $GATEWAY_DATA_DIR/"
+echo "   💾 Data Storage:   $GATEWAY_DATA_DIR/ (SQLite offline)"
 echo "   📝 Logs:           $LOG_DIR/"
 echo "   🐍 Virtual Env:    $VENV_PATH/"
-echo "   🗄️  Database:       $DB_NAME (MySQL)"
-echo "   👤 DB User:        $DB_USER"
+echo "   🗄️  Database Host:  192.168.1.100 (Database Pi)"
+echo "   📊 Database:       soilmonitornig"
+echo "   👤 DB User:        gateway_user"
 echo ""
 echo "🔧 SERVICE STATUS:"
 sudo systemctl status soil-gateway --no-pager --lines=3
 echo ""
 echo "🚀 QUICK START:"
 echo "   Test gateway:     $APP_DIR/test-gateway.sh"
-echo "   Test databases:   $APP_DIR/test-database.sh"
+echo "   Test DB conn:     $APP_DIR/manage-gateway.sh db-test"
 echo "   Manage gateway:   $APP_DIR/manage-gateway.sh [command]"
 echo ""
 echo "🌐 TEST ENDPOINTS:"
@@ -675,19 +577,18 @@ echo ""
 echo "📡 GATEWAY URL:"
 echo "   http://$(hostname -I | awk '{print $1}'):5000"
 echo ""
-echo "🔐 DATABASE CREDENTIALS:"
-echo "   Saved to: $APP_DIR/mysql_credentials.txt"
-echo "   🔒 Keep this file secure!"
-echo ""
-echo "🔄 AUTO-START:"
-echo "   Service enabled - Gateway starts automatically on boot"
+echo "🔐 DATABASE SETUP REQUIRED ON 192.168.1.100:"
+echo "   Run on Database Pi:"
+echo "   CREATE USER 'gateway_user'@'%' IDENTIFIED BY 'gateway_pass';"
+echo "   GRANT INSERT,SELECT ON soilmonitornig.* TO 'gateway_user'@'%';"
+echo "   FLUSH PRIVILEGES;"
 echo ""
 echo "❓ TROUBLESHOOTING:"
 echo "   View logs:        sudo journalctl -u soil-gateway -f"
-echo "   Restart service:  sudo systemctl restart soil-gateway"
-echo "   Check status:     sudo systemctl status soil-gateway"
+echo "   Test DB:          $APP_DIR/manage-gateway.sh db-test"
+echo "   Edit config:      nano $APP_DIR/gateway.py"
 echo ""
 echo "================================================"
-print_yellow "⚠️  IMPORTANT: Update API_URL in gateway.py if needed!"
-print_yellow "⚠️  Change MySQL root password from 'RootPassword123!'"
+print_yellow "⚠️  IMPORTANT: Configure user on Database Pi (192.168.1.100)!"
+print_yellow "⚠️  Update gateway.py if MySQL credentials are different"
 echo "================================================"
