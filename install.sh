@@ -72,13 +72,13 @@ sudo apt install libmariadb-dev -y  # For MySQL client library
 print_green "[4/12] Setting up application directory structure..."
 
 # Main application directory
-APP_DIR="/home/pi/soil-gateway"
+APP_DIR="/home/gateway/soil-gateway"
 sudo mkdir -p $APP_DIR
 sudo chown pi:pi $APP_DIR
 sudo chmod 755 $APP_DIR
 
 # Gateway data directory
-GATEWAY_DATA_DIR="/home/pi/soil_gateway_data"
+GATEWAY_DATA_DIR="/home/gateway/soil_gateway_data"
 sudo mkdir -p $GATEWAY_DATA_DIR
 sudo chown pi:pi $GATEWAY_DATA_DIR
 sudo chmod 755 $GATEWAY_DATA_DIR
@@ -130,7 +130,7 @@ fi
 # ========================
 print_green "[6/12] Creating Python virtual environment..."
 
-VENV_PATH="/home/pi/soil-gateway-venv"
+VENV_PATH="/home/gateway/soil-gateway-venv"
 if [ -d "$VENV_PATH" ]; then
     print_yellow "Virtual environment already exists at $VENV_PATH"
     read -p "Do you want to recreate it? (y/N): " -n 1 -r
@@ -316,8 +316,8 @@ sudo tee $START_SCRIPT > /dev/null << 'EOF'
 # Start Soil Monitoring Gateway
 
 echo "Starting Soil Monitoring Gateway..."
-source /home/pi/soil-gateway-venv/bin/activate
-cd /home/pi/soil-gateway
+source /home/gateway/soil-gateway-venv/bin/activate
+cd /home/gateway/soil-gateway
 python gateway.py
 EOF
 chmod +x $START_SCRIPT
@@ -349,11 +349,11 @@ case "$1" in
         ;;
     config)
         echo "Editing gateway configuration..."
-        sudo nano /home/pi/soil-gateway/gateway.py
+        sudo nano /home/gateway/soil-gateway/gateway.py
         ;;
     update)
         echo "Updating from GitHub..."
-        cd /home/pi/soil-gateway
+        cd /home/gateway/soil-gateway
         git pull
         sudo systemctl restart soil-gateway
         echo "Update completed"
